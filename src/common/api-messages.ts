@@ -3,9 +3,15 @@
 import { EnvKey } from './env-keys';
 
 export const ApiExceptionMessage = {
+  MISSING_DOWNLOAD_SHARE_SECRET:
+    'Thiếu hoặc rỗng DOWNLOAD_SHARE_SECRET — cần secret để ký link tải chia sẻ',
+  SHARE_TOKEN_INVALID: 'Token tải không hợp lệ hoặc đã hết hạn',
   PATCH_FILE_NO_CHANGE: 'Cần ít nhất một trong: name, folderId',
   INVALID_PATCH_FOLDER_ID: 'folderId phải là UUID hợp lệ hoặc root',
   FILE_CURSOR_REQUIRES_LIMIT: 'fileCursor chỉ dùng khi có fileLimit',
+  FOLDER_CURSOR_REQUIRES_LIMIT: 'folderCursor chỉ dùng khi có folderLimit',
+  FOLDER_ZIP_TOO_MANY_FILES:
+    'Quá nhiều file trong thư mục (kể cả con cháu) để đóng gói ZIP — giảm phạm vi hoặc tăng FOLDER_ZIP_MAX_FILES',
   MISSING_MULTIPART_FILE: 'Thiếu file (form field `file`)',
   QUEUE_JOB_CREATE_FAILED: 'Không tạo được job trên queue',
   JOB_NOT_FOUND: 'Không tìm thấy job',

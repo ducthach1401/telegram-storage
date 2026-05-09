@@ -18,6 +18,18 @@ export class FolderContentsResponseDto {
   @ApiPropertyOptional({
     nullable: true,
     description:
+      "Cursor cho GET tiếp theo (kèm cùng folderLimit); null khi hết trang hoặc không phân trang thư mục.",
+  })
+  foldersNextCursor?: string | null;
+
+  @ApiPropertyOptional({
+    description: "folderLimit đã dùng (chỉ khi phân trang thư mục con)",
+  })
+  foldersLimit?: number;
+
+  @ApiPropertyOptional({
+    nullable: true,
+    description:
       "Cursor cho GET tiếp theo (kèm cùng fileLimit); null khi hết trang hoặc không phân trang.",
   })
   filesNextCursor?: string | null;

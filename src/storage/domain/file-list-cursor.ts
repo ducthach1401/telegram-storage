@@ -12,15 +12,34 @@ export function encodeFileListCursor(name: string, id: string): string {
   return Buffer.from(json, 'utf8').toString('base64url');
 }
 
-export function decodeFileListCursor(cursor: string): FileListCursorPayload {
+/** Cùng định dạng với file (sort name + id); dùng cho foldersNextCursor. */
+export const encodeFolderListCursor = encodeFileListCursor;
+
+function parseNameIdCursor(cursor: string): FileListCursorPayload | null {
   try {
     const json = Buffer.from(cursor, 'base64url').toString('utf8');
     const v = JSON.parse(json) as Partial<FileListCursorPayload>;
     if (typeof v.n !== 'string' || typeof v.i !== 'string') {
-      throw new Error('invalid shape');
+      return null;
     }
     return { n: v.n, i: v.i };
   } catch {
+    return null;
+  }
+}
+
+export function decodeFileListCursor(cursor: string): FileListCursorPayload {
+  const p = parseNameIdCursor(cursor);
+  if (!p) {
     throw new BadRequestException('fileCursor không hợp lệ');
   }
+  return p;
+}
+
+export function decodeFolderListCursor(cursor: string): FileListCursorPayload {
+  const p = parseNameIdCursor(cursor);
+  if (!p) {
+    throw new BadRequestException('folderCursor không hợp lệ');
+  }
+  return p;
 }

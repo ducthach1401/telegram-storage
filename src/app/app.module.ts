@@ -1,6 +1,6 @@
 import { Module } from "@nestjs/common";
 import { ConfigModule, ConfigService } from "@nestjs/config";
-import { APP_GUARD } from "@nestjs/core";
+import { APP_FILTER, APP_GUARD } from "@nestjs/core";
 import { TypeOrmModule } from "@nestjs/typeorm";
 import { BasicAuthGuard } from "../auth/basic-auth.guard";
 import { EnvKey } from "../common/env-keys";
@@ -9,6 +9,7 @@ import { StoredFile } from "../storage/domain/entities/stored-file.entity";
 import { StorageModule } from "../storage/storage.module";
 import { AppController } from "./app.controller";
 import { AppService } from "./app.service";
+import { TelegramAlertExceptionFilter } from "./telegram-alert-exception.filter";
 
 @Module({
   imports: [
@@ -37,6 +38,10 @@ import { AppService } from "./app.service";
     {
       provide: APP_GUARD,
       useClass: BasicAuthGuard,
+    },
+    {
+      provide: APP_FILTER,
+      useClass: TelegramAlertExceptionFilter,
     },
   ],
 })

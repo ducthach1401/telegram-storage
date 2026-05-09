@@ -18,11 +18,19 @@ function assertBasicAuthEnv(config: ConfigService): void {
   }
 }
 
+function assertDownloadShareSecret(config: ConfigService): void {
+  const secret = config.get<string>(EnvKey.DOWNLOAD_SHARE_SECRET)?.trim();
+  if (!secret || secret.length < 16) {
+    throw new Error(ApiExceptionMessage.MISSING_DOWNLOAD_SHARE_SECRET);
+  }
+}
+
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
   const config = app.get(ConfigService);
 
   assertBasicAuthEnv(config);
+  assertDownloadShareSecret(config);
 
   app.enableShutdownHooks();
   app.enableCors();

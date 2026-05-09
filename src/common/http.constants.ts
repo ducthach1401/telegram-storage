@@ -21,6 +21,7 @@ export const HttpMethod = {
 
 export const MimeType = {
   OCTET_STREAM: 'application/octet-stream',
+  APPLICATION_ZIP: 'application/zip',
   JPEG: 'image/jpeg',
   TEXT_PLAIN_UTF8: 'text/plain; charset=utf-8',
 } as const;

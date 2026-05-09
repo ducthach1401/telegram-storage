@@ -19,6 +19,7 @@ import {
   UseInterceptors,
   ValidationPipe,
 } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { FileInterceptor } from '@nestjs/platform-express';
 import {
   ApiAcceptedResponse,
@@ -43,10 +44,12 @@ import { ApiExceptionMessage } from '../../common/api-messages';
 import { API_V1_PREFIX } from '../../common/api-route';
 import { ROOT_FOLDER_ALIAS, ROOT_FOLDER_ID } from '../domain/constants';
 import { parseDuplicateNamePolicy } from '../domain/duplicate-name-policy';
+import { CreateShareDownloadDto } from '../domain/dto/create-share-download.dto';
 import { DuplicatePolicyQueryDto } from '../domain/dto/duplicate-policy-query.dto';
 import { FileSearchQueryDto } from '../domain/dto/file-search-query.dto';
 import { FileSearchResponseDto } from '../domain/dto/file-search-response.dto';
 import { PatchFileDto } from '../domain/dto/patch-file.dto';
+import { ShareDownloadLinkResponseDto } from '../domain/dto/share-download-link-response.dto';
 import { EnvKey } from '../../common/env-keys';
 import {
   CacheControlValue,
@@ -67,26 +70,24 @@ import {
   FILE_UPLOAD_QUEUE,
 } from '../queue/file-upload.constants';
 import type { FileUploadJobData } from '../queue/file-upload.processor';
+import { ShareDownloadTokenService } from '../share/share-download-token.service';
 import { StorageService } from '../storage.service';
 import {
   FileMultipart,
   FileRouteParam,
   FileRoutePath,
+  FileRoutePathSegment,
+  SharedFilesQuery,
+  SharedFilesRoutePath,
 } from '../storage-http.constants';
-
-function contentDisposition(
-  mode: (typeof ContentDispositionMode)[keyof typeof ContentDispositionMode],
-  name: string,
-): string {
-  const ascii = name.replace(/[^\x20-\x7E]/g, '_');
-  return `${mode}; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(name)}`;
-}
 
 @ApiTags('files')
 @Controller(`${API_V1_PREFIX}/files`)
 export class FileController {
   constructor(
     private readonly storage: StorageService,
+    private readonly config: ConfigService,
+    private readonly shareDownloadToken: ShareDownloadTokenService,
     @InjectQueue(FILE_UPLOAD_QUEUE) private readonly uploadQueue: Queue<FileUploadJobData>,
   ) {}
 
@@ -300,6 +301,49 @@ export class FileController {
     return FileController.toSummary(saved);
   }
 
+  @Post(`:id/${FileRoutePathSegment.SHARE_DOWNLOAD}`)
+  @ApiOperation({
+    summary: 'Tạo link tải/xem công khai (token có TTL)',
+    description:
+      'Cần Basic Auth. Người nhận chỉ cần URL có `token` — không cần Basic Auth. Đặt `PUBLIC_APP_URL` (không dấu `/` cuối) để có `downloadUrl` / `viewUrl` đầy đủ.',
+  })
+  @ApiBody({
+    type: CreateShareDownloadDto,
+    required: false,
+    description: 'Tuỳ chọn `ttlSeconds` (60–604800; mặc định 86400)',
+  })
+  @ApiParam({ name: 'id', format: 'uuid' })
+  @ApiOkResponse({ type: ShareDownloadLinkResponseDto })
+  @ApiNotFoundResponse({ description: 'Không tìm thấy file' })
+  async createShareDownload(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body(ValidationPipe) body: CreateShareDownloadDto,
+  ): Promise<ShareDownloadLinkResponseDto> {
+    await this.storage.getFile(id);
+    const ttl = body.ttlSeconds ?? 86400;
+    const { token, expiresAt } = this.shareDownloadToken.create(id, ttl);
+    const base = `/${API_V1_PREFIX}/${SharedFilesRoutePath.BASE}`;
+    const downloadPath = `${base}/${SharedFilesRoutePath.DOWNLOAD}?${SharedFilesQuery.TOKEN}=${encodeURIComponent(token)}`;
+    const viewPath = `${base}/${SharedFilesRoutePath.VIEW}?${SharedFilesQuery.TOKEN}=${encodeURIComponent(token)}`;
+    const publicBase = this.config
+      .get<string>(EnvKey.PUBLIC_APP_URL)
+      ?.trim()
+      .replace(/\/+$/, '');
+    const dto: ShareDownloadLinkResponseDto = {
+      token,
+      expiresAt,
+      downloadPath,
+      viewPath,
+      ...(publicBase
+        ? {
+            downloadUrl: `${publicBase}${downloadPath}`,
+            viewUrl: `${publicBase}${viewPath}`,
+          }
+        : {}),
+    };
+    return dto;
+  }
+
   @Delete(':id')
   @HttpCode(HttpStatus.NO_CONTENT)
   @ApiOperation({
@@ -340,7 +384,11 @@ export class FileController {
     @Param('id', ParseUUIDPipe) id: string,
     @Res({ passthrough: false }) res: Response,
   ) {
-    await this.pipeOriginal(id, res, ContentDispositionMode.ATTACHMENT);
+    await this.storage.streamOriginalToExpressResponse(
+      id,
+      res,
+      ContentDispositionMode.ATTACHMENT,
+    );
   }
 
   /** Hiển thị trong trình duyệt (ảnh/PDF tùy MIME) */
@@ -353,7 +401,11 @@ export class FileController {
     @Param('id', ParseUUIDPipe) id: string,
     @Res({ passthrough: false }) res: Response,
   ) {
-    await this.pipeOriginal(id, res, ContentDispositionMode.INLINE);
+    await this.storage.streamOriginalToExpressResponse(
+      id,
+      res,
+      ContentDispositionMode.INLINE,
+    );
   }
 
   @Get(':id/thumbnail')
@@ -396,26 +448,5 @@ export class FileController {
       telegramMessageId: f.telegramMessageId,
       createdAt: f.createdAt instanceof Date ? f.createdAt : new Date(f.createdAt as string),
     };
-  }
-
-  private async pipeOriginal(
-    id: string,
-    res: Response,
-    disposition: (typeof ContentDispositionMode)[keyof typeof ContentDispositionMode],
-  ) {
-    const f = await this.storage.getFile(id);
-    const url = await this.storage.getDownloadUrl(f.telegramFileId);
-    const r = await fetch(url);
-    if (!r.ok || !r.body) {
-      throw new BadGatewayException(
-        ApiExceptionMessage.TELEGRAM_FILE_DOWNLOAD_FAILED,
-      );
-    }
-    res.setHeader(HttpHeader.CONTENT_TYPE, f.mimeType);
-    res.setHeader(
-      HttpHeader.CONTENT_DISPOSITION,
-      contentDisposition(disposition, f.name),
-    );
-    Readable.fromWeb(r.body as import('stream/web').ReadableStream).pipe(res);
   }
 }

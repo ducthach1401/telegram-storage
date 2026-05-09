@@ -3,6 +3,7 @@ import { Logger } from '@nestjs/common';
 import { Job } from 'bullmq';
 import { readFile, unlink } from 'fs/promises';
 import { StoredFile } from '../domain/entities/stored-file.entity';
+import { TelegramService } from '../telegram/telegram.service';
 import { StorageService } from '../storage.service';
 import { EnvKey } from '../../common/env-keys';
 import { UploadDefaults } from '../../common/upload.defaults';
@@ -31,7 +32,10 @@ const workerConcurrency = Math.max(
 export class FileUploadProcessor extends WorkerHost {
   private readonly log = new Logger(FileUploadProcessor.name);
 
-  constructor(private readonly storage: StorageService) {
+  constructor(
+    private readonly storage: StorageService,
+    private readonly telegram: TelegramService,
+  ) {
     super();
   }
 
@@ -58,6 +62,16 @@ export class FileUploadProcessor extends WorkerHost {
     if (job.attemptsMade < maxAttempts) {
       return;
     }
+    const reason = job.failedReason ?? '(không có failedReason)';
+    void this.telegram.sendAlertPlainText(
+      [
+        '🚨 Telegram Storage — upload queue thất bại (hết retry)',
+        `jobId: ${String(job.id)}`,
+        `file: ${job.data.finalFileName}`,
+        `mimeType: ${job.data.mimeType}`,
+        reason,
+      ].join('\n'),
+    );
     const { tempPath } = job.data;
     await unlink(tempPath).catch((err) =>
       this.log.warn(`Không xóa được file tạm sau failed: ${tempPath}: ${String(err)}`),

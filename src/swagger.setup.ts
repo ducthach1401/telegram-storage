@@ -5,12 +5,16 @@ export function setupSwagger(app: INestApplication): void {
   const builder = new DocumentBuilder()
     .setTitle("Telegram Storage API")
     .setDescription(
-      "Luôn cần **Basic Auth** (`Authorization: Basic …`). User/password trong `.env`: `API_BASIC_AUTH_USER`, `API_BASIC_AUTH_PASSWORD`.",
+      "Hầu hết endpoint cần **Basic Auth** (`Authorization: Basic …`). User/password trong `.env`: `API_BASIC_AUTH_USER`, `API_BASIC_AUTH_PASSWORD`. Nhóm **shared** (`GET …/shared/files/download|view?token=`) **không** cần Basic Auth — chỉ cần token hợp lệ từ `POST …/files/:id/share-download`.",
     )
     .setVersion("1.0")
     .addTag("app", "Thông tin service")
     .addTag("folders", "Thư mục (drive)")
     .addTag("files", "Upload & truy cập file")
+    .addTag(
+      "shared",
+      "Link tải/xem công khai — không Basic Auth; query token từ POST share-download",
+    )
     .addTag(
       "admin",
       "Queue BullMQ & reconcile DB ↔ Telegram (Basic Auth như mọi endpoint)",

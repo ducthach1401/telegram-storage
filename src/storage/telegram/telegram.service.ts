@@ -87,4 +87,21 @@ export class TelegramService implements OnModuleInit {
       return false;
     }
   }
+
+  /**
+   * Gửi tin nhắn vận hành (lỗi server, queue…). Best-effort — không throw.
+   * Chỉ gửi khi env `TELEGRAM_ALERT_CHAT_ID` không rỗng (khác chat lưu file nếu muốn).
+   */
+  async sendAlertPlainText(text: string): Promise<void> {
+    const alertChatId = this.config.get<string>(EnvKey.TELEGRAM_ALERT_CHAT_ID)?.trim();
+    if (!alertChatId) {
+      return;
+    }
+    const body = text.length > 4096 ? `${text.slice(0, 4080)}…` : text;
+    try {
+      await this.bot.api.sendMessage(alertChatId, body);
+    } catch (err) {
+      console.error('[TelegramService] sendAlertPlainText failed:', err);
+    }
+  }
 }

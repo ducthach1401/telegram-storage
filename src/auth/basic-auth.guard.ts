@@ -5,6 +5,7 @@ import {
   UnauthorizedException,
 } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
+import { Reflector } from "@nestjs/core";
 import { timingSafeEqual } from "crypto";
 import type { Request, Response } from "express";
 import { ApiExceptionMessage } from "../common/api-messages";
@@ -17,15 +18,27 @@ import {
   HttpIncomingHeader,
   HttpMethod,
 } from "../common/http.constants";
+import { IS_PUBLIC_KEY } from "./public.decorator";
 
 /**
  * Basic Auth luôn bật — user/password lấy từ EnvKey.API_BASIC_AUTH_* (bootstrap kiểm tra không rỗng).
  */
 @Injectable()
 export class BasicAuthGuard implements CanActivate {
-  constructor(private readonly config: ConfigService) {}
+  constructor(
+    private readonly config: ConfigService,
+    private readonly reflector: Reflector,
+  ) {}
 
   canActivate(context: ExecutionContext): boolean {
+    const isPublic = this.reflector.getAllAndOverride<boolean>(IS_PUBLIC_KEY, [
+      context.getHandler(),
+      context.getClass(),
+    ]);
+    if (isPublic) {
+      return true;
+    }
+
     const req = context.switchToHttp().getRequest<Request>();
     const res = context.switchToHttp().getResponse<Response>();
 

@@ -23,4 +23,25 @@ export class FolderContentsQueryDto {
   @IsOptional()
   @IsString()
   fileCursor?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Giới hạn số thư mục con trả về (phân trang). Không gửi = trả toàn bộ thư mục con như trước.',
+    minimum: 1,
+    maximum: 500,
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(500)
+  folderLimit?: number;
+
+  @ApiPropertyOptional({
+    description:
+      'Cursor trang tiếp (giá trị foldersNextCursor từ response trước); chỉ dùng khi có folderLimit.',
+  })
+  @IsOptional()
+  @IsString()
+  folderCursor?: string;
 }

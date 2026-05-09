@@ -11,6 +11,8 @@ import { ReconcileController } from './admin/reconcile.controller';
 import { ReconcileService } from './admin/reconcile.service';
 import { FileController } from './file/file.controller';
 import { FolderController } from './folder/folder.controller';
+import { SharedFileController } from './shared/shared-file.controller';
+import { ShareDownloadTokenService } from './share/share-download-token.service';
 import {
   BullMqBackoffType,
   FILE_UPLOAD_QUEUE,
@@ -64,9 +66,17 @@ import { TelegramService } from './telegram/telegram.service';
   controllers: [
     FolderController,
     FileController,
+    SharedFileController,
     QueueAdminController,
     ReconcileController,
   ],
-  providers: [StorageService, TelegramService, FileUploadProcessor, ReconcileService],
+  providers: [
+    StorageService,
+    TelegramService,
+    ShareDownloadTokenService,
+    FileUploadProcessor,
+    ReconcileService,
+  ],
+  exports: [TelegramService],
 })
 export class StorageModule {}
