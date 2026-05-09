@@ -58,6 +58,10 @@ import {
   MimeType,
 } from '../../common/http.constants';
 import { UploadDefaults } from '../../common/upload.defaults';
+import {
+  FileMetaBatchRequestDto,
+  FileMetaBatchResponseDto,
+} from '../domain/dto/file-meta-batch.dto';
 import { FileMetaResponseDto } from '../domain/dto/file-meta-response.dto';
 import { StoredFileSummaryDto } from '../domain/dto/stored-file-summary.dto';
 import { UploadJobQueuedDto } from '../domain/dto/upload-job-queued.dto';
@@ -260,6 +264,20 @@ export class FileController {
     return {
       items: items.map((f) => FileController.toSummary(f)),
     };
+  }
+
+  @Post('meta/batch')
+  @ApiOperation({
+    summary: 'Metadata nhiều file',
+    description: 'Tối đa 100 UUID; chỉ trả các id tìm thấy (giữ thứ tự trong body).',
+  })
+  @ApiBody({ type: FileMetaBatchRequestDto })
+  @ApiOkResponse({ type: FileMetaBatchResponseDto })
+  async metaBatch(
+    @Body(ValidationPipe) body: FileMetaBatchRequestDto,
+  ): Promise<FileMetaBatchResponseDto> {
+    const items = await this.storage.getFilesMetaBatch(body.ids);
+    return { items };
   }
 
   @Patch(':id')

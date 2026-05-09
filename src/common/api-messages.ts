@@ -12,7 +12,15 @@ export const ApiExceptionMessage = {
   FOLDER_CURSOR_REQUIRES_LIMIT: 'folderCursor chỉ dùng khi có folderLimit',
   FOLDER_ZIP_TOO_MANY_FILES:
     'Quá nhiều file trong thư mục (kể cả con cháu) để đóng gói ZIP — giảm phạm vi hoặc tăng FOLDER_ZIP_MAX_FILES',
+  FOLDER_COPY_ROOT_FORBIDDEN: 'Không sao chép được thư mục gốc (root) toàn bộ drive',
+  FOLDER_COPY_TARGET_INSIDE_SOURCE:
+    'Không được sao chép thư mục vào chính thư mục đó hoặc vào thư mục con bên trong',
+  WEBHOOK_SECRET_INVALID: 'Secret webhook Telegram không khớp',
+  META_BATCH_TOO_MANY_IDS: 'Quá nhiều id trong batch — giảm số lượng',
+  FOLDER_ZIP_JOB_NOT_READY: 'Job ZIP chưa hoàn thành hoặc không có kết quả',
   MISSING_MULTIPART_FILE: 'Thiếu file (form field `file`)',
+  MYSQL_IMPORT_FAILED:
+    'Import MySQL thất bại — kiểm tra file SQL/gzip và stderr trong response',
   QUEUE_JOB_CREATE_FAILED: 'Không tạo được job trên queue',
   JOB_NOT_FOUND: 'Không tìm thấy job',
   FILE_NO_THUMBNAIL: 'File không có thumbnail',
@@ -26,6 +34,7 @@ export const ApiExceptionMessage = {
 
 export const StorageExceptionMessage = {
   FOLDER_NOT_FOUND: 'Không tìm thấy thư mục',
+  FOLDER_NAME_EMPTY: 'Tên thư mục không được để trống',
   FOLDER_DUPLICATE_NAME: 'Đã có thư mục cùng tên trong thư mục cha',
   FILE_DUPLICATE_NAME: 'Đã có file cùng tên trong thư mục',
   FILE_SUFFIX_EXHAUSTED:

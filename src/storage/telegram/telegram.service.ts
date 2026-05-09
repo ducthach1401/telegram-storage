@@ -1,3 +1,4 @@
+import { createReadStream } from 'fs';
 import { Injectable, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Bot, InputFile } from 'grammy';
@@ -102,6 +103,20 @@ export class TelegramService implements OnModuleInit {
       await this.bot.api.sendMessage(alertChatId, body);
     } catch (err) {
       console.error('[TelegramService] sendAlertPlainText failed:', err);
+    }
+  }
+
+  /** Gửi document từ đường dẫn file (stream) — dùng backup MySQL lớn. */
+  async sendDocumentFromPath(
+    chatId: string,
+    absolutePath: string,
+    filename: string,
+  ): Promise<void> {
+    const rs = createReadStream(absolutePath);
+    try {
+      await this.bot.api.sendDocument(chatId, new InputFile(rs, filename));
+    } finally {
+      rs.destroy();
     }
   }
 }

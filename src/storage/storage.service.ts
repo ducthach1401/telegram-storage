@@ -9,10 +9,14 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import archiver from 'archiver';
+import { createReadStream, createWriteStream } from 'fs';
+import { mkdir, unlink } from 'fs/promises';
+import { dirname, join } from 'path';
 import type { Response } from 'express';
+import { finished } from 'stream/promises';
 import { Readable } from 'stream';
 import sharp from 'sharp';
-import { Repository } from 'typeorm';
+import { In, Repository } from 'typeorm';
 import {
   ApiExceptionMessage,
   StorageExceptionMessage,
@@ -110,6 +114,27 @@ export class StorageService implements OnModuleInit {
       name: dto.name,
     });
     return this.folderRepo.save(folder);
+  }
+
+  /**
+   * Đảm bảo có thư mục con `folderName` dưới `parentId`; không throw khi đã tồn tại (khác `createFolder`).
+   */
+  async ensureNamedChildFolder(parentId: string, folderName: string): Promise<string> {
+    const name = folderName.trim();
+    if (!name) {
+      throw new BadRequestException(StorageExceptionMessage.FOLDER_NAME_EMPTY);
+    }
+    await this.ensureFolder(parentId);
+    const existing = await this.folderRepo.findOne({
+      where: { parentId, name },
+    });
+    if (existing) {
+      return existing.id;
+    }
+    const created = await this.folderRepo.save(
+      this.folderRepo.create({ parentId, name }),
+    );
+    return created.id;
   }
 
   async listContents(
@@ -443,7 +468,15 @@ export class StorageService implements OnModuleInit {
   }
 
   private async removeFileFromDbAndTelegram(f: StoredFile): Promise<void> {
-    await this.telegram.deleteChatMessage(f.telegramMessageId);
+    const msgId = f.telegramMessageId;
+    if (msgId != null && msgId !== '') {
+      const cnt = await this.fileRepo.count({
+        where: { telegramMessageId: msgId },
+      });
+      if (cnt <= 1) {
+        await this.telegram.deleteChatMessage(msgId);
+      }
+    }
     await this.fileRepo.remove(f);
   }
 
@@ -481,12 +514,14 @@ export class StorageService implements OnModuleInit {
     return this.telegram.getFileDownloadUrl(fileId);
   }
 
-  /** Tải cả cây thư mục dưới dạng ZIP (đệ quy). Tuần tự từ Telegram — có thể chậm với nhiều file. */
-  async streamFolderZipToResponse(folderIdParam: string, res: Response): Promise<void> {
+  /** Chuẩn bị danh sách entry ZIP + tên file — dùng sync stream và worker folder-zip. */
+  async prepareFolderZipArchive(folderIdParam: string): Promise<{
+    entries: Array<{ zipPath: string; telegramFileId: string }>;
+    zipBaseName: string;
+  }> {
     const folderId = this.resolveFolderId(folderIdParam);
     const folder = await this.ensureFolder(folderId);
     const maxFiles = this.readFolderZipMaxFilesCap();
-
     const entries = await this.collectDescendantFilesForZip(folderId, '');
     if (entries.length > maxFiles) {
       throw new BadRequestException({
@@ -495,8 +530,75 @@ export class StorageService implements OnModuleInit {
         found: entries.length,
       });
     }
+    return {
+      entries,
+      zipBaseName: StorageService.zipArchiveBasename(folder),
+    };
+  }
 
-    const zipBaseName = StorageService.zipArchiveBasename(folder);
+  /** Ghi ZIP ra đĩa (worker queue). */
+  async writeFolderZipToDisk(
+    entries: Array<{ zipPath: string; telegramFileId: string }>,
+    zipBaseName: string,
+    absoluteZipPath: string,
+  ): Promise<void> {
+    await mkdir(dirname(absoluteZipPath), { recursive: true });
+    const output = createWriteStream(absoluteZipPath);
+    const archive = archiver('zip', { zlib: { level: 6 } });
+    archive.pipe(output);
+
+    try {
+      for (const e of entries) {
+        const url = await this.getDownloadUrl(e.telegramFileId);
+        const r = await fetch(url);
+        if (!r.ok || !r.body) {
+          archive.abort();
+          throw new BadGatewayException(
+            ApiExceptionMessage.TELEGRAM_FILE_DOWNLOAD_FAILED,
+          );
+        }
+        archive.append(Readable.fromWeb(r.body as import('stream/web').ReadableStream), {
+          name: e.zipPath,
+        });
+      }
+      await archive.finalize();
+      await finished(output);
+    } catch (err) {
+      archive.abort();
+      output.destroy();
+      await unlink(absoluteZipPath).catch(() => undefined);
+      throw err;
+    }
+  }
+
+  /** Stream file ZIP đã build (tải token async); xóa file sau khi stream xong. */
+  async streamZipFileToResponse(
+    absoluteZipPath: string,
+    zipBaseName: string,
+    res: Response,
+  ): Promise<void> {
+    res.setHeader(HttpHeader.CONTENT_TYPE, MimeType.APPLICATION_ZIP);
+    res.setHeader(
+      HttpHeader.CONTENT_DISPOSITION,
+      contentDispositionHeader(ContentDispositionMode.ATTACHMENT, `${zipBaseName}.zip`),
+    );
+    const rs = createReadStream(absoluteZipPath);
+    rs.once('error', () => {
+      void unlink(absoluteZipPath).catch(() => undefined);
+    });
+    res.once('close', () => {
+      void unlink(absoluteZipPath).catch(() => undefined);
+    });
+    rs.once('end', () => {
+      void unlink(absoluteZipPath).catch(() => undefined);
+    });
+    rs.pipe(res);
+  }
+
+  /** Tải cả cây thư mục dưới dạng ZIP (đệ quy). Tuần tự từ Telegram — có thể chậm với nhiều file. */
+  async streamFolderZipToResponse(folderIdParam: string, res: Response): Promise<void> {
+    const { entries, zipBaseName } = await this.prepareFolderZipArchive(folderIdParam);
+
     res.setHeader(HttpHeader.CONTENT_TYPE, MimeType.APPLICATION_ZIP);
     res.setHeader(
       HttpHeader.CONTENT_DISPOSITION,
@@ -534,6 +636,209 @@ export class StorageService implements OnModuleInit {
         }
       })();
     });
+  }
+
+  async copyFolderBranch(
+    sourceFolderId: string,
+    targetParentIdParam: string | undefined,
+  ): Promise<Folder> {
+    if (sourceFolderId === ROOT_FOLDER_ID) {
+      throw new BadRequestException(ApiExceptionMessage.FOLDER_COPY_ROOT_FORBIDDEN);
+    }
+    const src = await this.ensureFolder(sourceFolderId);
+    const targetParentId = targetParentIdParam
+      ? this.resolveFolderId(targetParentIdParam)
+      : ROOT_FOLDER_ID;
+    await this.ensureFolder(targetParentId);
+    await this.assertTargetParentOutsideSourceSubtree(sourceFolderId, targetParentId);
+
+    const sibling = await this.folderRepo.findOne({
+      where: { parentId: targetParentId, name: src.name },
+    });
+    if (sibling) {
+      throw new ConflictException(StorageExceptionMessage.FOLDER_DUPLICATE_NAME);
+    }
+
+    const rootCopy = await this.folderRepo.save(
+      this.folderRepo.create({ parentId: targetParentId, name: src.name }),
+    );
+
+    const queue: Array<{ srcId: string; dstId: string }> = [
+      { srcId: sourceFolderId, dstId: rootCopy.id },
+    ];
+
+    while (queue.length > 0) {
+      const pair = queue.pop();
+      if (!pair) break;
+      const { srcId, dstId } = pair;
+
+      const files = await this.fileRepo.find({
+        where: { folderId: srcId },
+        order: { name: TYPEORM_ORDER_ASC },
+      });
+      for (const f of files) {
+        await this.fileRepo.save(
+          this.fileRepo.create({
+            folderId: dstId,
+            name: f.name,
+            mimeType: f.mimeType,
+            size: f.size,
+            telegramFileId: f.telegramFileId,
+            telegramFileUniqueId: f.telegramFileUniqueId,
+            thumbnailTelegramFileId: f.thumbnailTelegramFileId,
+            telegramMessageId: f.telegramMessageId,
+          }),
+        );
+      }
+
+      const subs = await this.folderRepo.find({
+        where: { parentId: srcId },
+        order: { name: TYPEORM_ORDER_ASC },
+      });
+      for (const sub of subs) {
+        const clash = await this.folderRepo.findOne({
+          where: { parentId: dstId, name: sub.name },
+        });
+        if (clash) {
+          throw new ConflictException(StorageExceptionMessage.FOLDER_DUPLICATE_NAME);
+        }
+        const nf = await this.folderRepo.save(
+          this.folderRepo.create({ parentId: dstId, name: sub.name }),
+        );
+        queue.push({ srcId: sub.id, dstId: nf.id });
+      }
+    }
+
+    return rootCopy;
+  }
+
+  async findDuplicateFileGroups(): Promise<
+    Array<{ telegramFileUniqueId: string; files: StoredFile[] }>
+  > {
+    const rows = await this.fileRepo
+      .createQueryBuilder('f')
+      .select('f.telegramFileUniqueId', 'telegramFileUniqueId')
+      .addSelect('COUNT(*)', 'cnt')
+      .groupBy('f.telegramFileUniqueId')
+      .having('COUNT(*) > :n', { n: 1 })
+      .getRawMany<{ telegramFileUniqueId: string }>();
+
+    const groups: Array<{ telegramFileUniqueId: string; files: StoredFile[] }> = [];
+    for (const r of rows) {
+      const files = await this.fileRepo.find({
+        where: { telegramFileUniqueId: r.telegramFileUniqueId },
+        order: { createdAt: TYPEORM_ORDER_ASC },
+      });
+      groups.push({ telegramFileUniqueId: r.telegramFileUniqueId, files });
+    }
+    return groups;
+  }
+
+  async getFilesMetaBatch(ids: string[]): Promise<
+    Array<{
+      id: string;
+      name: string;
+      mimeType: string;
+      size: number;
+      folderId: string;
+      createdAt: Date;
+      hasThumbnail: boolean;
+    }>
+  > {
+    if (ids.length > 100) {
+      throw new BadRequestException(ApiExceptionMessage.META_BATCH_TOO_MANY_IDS);
+    }
+    const uniq = [...new Set(ids)];
+    if (uniq.length === 0) {
+      return [];
+    }
+    const files = await this.fileRepo.find({ where: { id: In(uniq) } });
+    const map = new Map(files.map((f) => [f.id, f]));
+    return uniq
+      .map((id) => map.get(id))
+      .filter((f): f is StoredFile => f !== undefined)
+      .map((f) => ({
+        id: f.id,
+        name: f.name,
+        mimeType: f.mimeType,
+        size: f.size,
+        folderId: f.folderId,
+        createdAt: f.createdAt instanceof Date ? f.createdAt : new Date(f.createdAt as string),
+        hasThumbnail: !!f.thumbnailTelegramFileId,
+      }));
+  }
+
+  async ingestInboundTelegramDocument(params: {
+    messageId: number;
+    document: {
+      file_id: string;
+      file_unique_id: string;
+      file_name?: string;
+      mime_type?: string;
+      file_size?: number;
+    };
+    thumbnailFileId: string | null;
+  }): Promise<StoredFile | null> {
+    const mid = String(params.messageId);
+    const existing = await this.fileRepo.findOne({ where: { telegramMessageId: mid } });
+    if (existing) {
+      return null;
+    }
+
+    const syncFolderRaw = this.config.get<string>(EnvKey.TELEGRAM_SYNC_FOLDER_ID)?.trim();
+    const folderId = syncFolderRaw
+      ? this.resolveFolderId(syncFolderRaw)
+      : ROOT_FOLDER_ID;
+    await this.ensureFolder(folderId);
+
+    const baseName =
+      params.document.file_name?.trim() ||
+      `telegram_${params.document.file_unique_id}`;
+    const fileName = await this.uniqueInboundFileName(folderId, baseName);
+
+    const entity = this.fileRepo.create({
+      folderId,
+      name: fileName,
+      mimeType: params.document.mime_type ?? MimeType.OCTET_STREAM,
+      size: params.document.file_size ?? 0,
+      telegramFileId: params.document.file_id,
+      telegramFileUniqueId: params.document.file_unique_id,
+      thumbnailTelegramFileId: params.thumbnailFileId,
+      telegramMessageId: mid,
+    });
+    return this.fileRepo.save(entity);
+  }
+
+  /** Đường dẫn tuyệt đối file ZIP khi build queue — worker gọi. */
+  resolveFolderZipOutputPath(jobId: string): string {
+    const baseDir =
+      this.config.get<string>(EnvKey.UPLOAD_TMP_DIR)?.trim() ||
+      join(process.cwd(), 'tmp', 'uploads');
+    return join(baseDir, 'folder-zip', `${jobId}.zip`);
+  }
+
+  private async assertTargetParentOutsideSourceSubtree(
+    sourceFolderId: string,
+    targetParentId: string,
+  ): Promise<void> {
+    let cur: string | null = targetParentId;
+    while (cur !== null) {
+      if (cur === sourceFolderId) {
+        throw new BadRequestException(
+          ApiExceptionMessage.FOLDER_COPY_TARGET_INSIDE_SOURCE,
+        );
+      }
+      const folder = await this.folderRepo.findOne({ where: { id: cur } });
+      cur = folder?.parentId ?? null;
+    }
+  }
+
+  private async uniqueInboundFileName(folderId: string, baseName: string): Promise<string> {
+    const exists = await this.fileRepo.exist({ where: { folderId, name: baseName } });
+    if (!exists) {
+      return baseName;
+    }
+    return this.allocateSuffixName(folderId, baseName);
   }
 
   private readFolderZipMaxFilesCap(): number {

@@ -3,6 +3,16 @@
 export const AdminControllerPath = {
   QUEUE: 'admin/queue',
   RECONCILE: 'admin/reconcile',
+  FILES: 'admin/files',
+  MYSQL: 'admin/mysql',
+} as const;
+
+export const AdminMysqlSubRoute = {
+  IMPORT: 'import',
+} as const;
+
+export const AdminFilesSubRoute = {
+  DUPLICATES: 'duplicates',
 } as const;
 
 export const AdminQueueSubRoute = {

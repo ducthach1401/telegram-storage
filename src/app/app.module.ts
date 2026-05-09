@@ -2,7 +2,11 @@ import { Module } from "@nestjs/common";
 import { ConfigModule, ConfigService } from "@nestjs/config";
 import { APP_FILTER, APP_GUARD } from "@nestjs/core";
 import { TypeOrmModule } from "@nestjs/typeorm";
+import { ScheduleModule } from "@nestjs/schedule";
+import { ThrottlerModule } from "@nestjs/throttler";
+import { MysqlBackupSchedulerService } from "../backup/mysql-backup.scheduler";
 import { BasicAuthGuard } from "../auth/basic-auth.guard";
+import { ShareRouteThrottlerGuard } from "../auth/share-throttler.guard";
 import { EnvKey } from "../common/env-keys";
 import { Folder } from "../storage/domain/entities/folder.entity";
 import { StoredFile } from "../storage/domain/entities/stored-file.entity";
@@ -14,6 +18,7 @@ import { TelegramAlertExceptionFilter } from "./telegram-alert-exception.filter"
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true }),
+    ScheduleModule.forRoot(),
     TypeOrmModule.forRootAsync({
       imports: [ConfigModule],
       inject: [ConfigService],
@@ -31,10 +36,33 @@ import { TelegramAlertExceptionFilter } from "./telegram-alert-exception.filter"
       }),
     }),
     StorageModule,
+    ThrottlerModule.forRootAsync({
+      imports: [ConfigModule],
+      inject: [ConfigService],
+      useFactory: (config: ConfigService) => ({
+        throttlers: [
+          {
+            ttl: Math.max(
+              1000,
+              Number(config.get<string>(EnvKey.SHARE_RATE_LIMIT_TTL_MS) ?? 60000),
+            ),
+            limit: Math.max(
+              1,
+              Number(config.get<string>(EnvKey.SHARE_RATE_LIMIT_MAX) ?? 60),
+            ),
+          },
+        ],
+      }),
+    }),
   ],
   controllers: [AppController],
   providers: [
     AppService,
+    MysqlBackupSchedulerService,
+    {
+      provide: APP_GUARD,
+      useClass: ShareRouteThrottlerGuard,
+    },
     {
       provide: APP_GUARD,
       useClass: BasicAuthGuard,

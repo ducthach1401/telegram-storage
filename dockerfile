@@ -11,6 +11,8 @@ RUN npm run build
 FROM node:22-alpine AS production
 WORKDIR /app
 
+RUN apk add --no-cache mariadb-client
+
 RUN npm install -g pm2 --no-audit --no-fund
 
 COPY package*.json ecosystem.config.cjs ./

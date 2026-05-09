@@ -13,8 +13,9 @@ export function setupSwagger(app: INestApplication): void {
     .addTag("files", "Upload & truy cập file")
     .addTag(
       "shared",
-      "Link tải/xem công khai — không Basic Auth; query token từ POST share-download",
+      "Link tải/xem công khai — không Basic Auth; có giới hạn request/phút (Throttler, env SHARE_RATE_LIMIT_*)",
     )
+    .addTag("telegram", "Webhook đồng bộ ngược document vào DB (`POST …/telegram/webhook`)")
     .addTag(
       "admin",
       "Queue BullMQ & reconcile DB ↔ Telegram (Basic Auth như mọi endpoint)",

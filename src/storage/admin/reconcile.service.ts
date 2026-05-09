@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { StoredFile } from '../domain/entities/stored-file.entity';
+import { StorageService } from '../storage.service';
 import { TelegramService } from '../telegram/telegram.service';
 import { ReconcileRequestDto } from './dto/reconcile-request.dto';
 import { ReconcileResponseDto } from './dto/reconcile-response.dto';
@@ -16,6 +17,7 @@ export class ReconcileService {
     @InjectRepository(StoredFile)
     private readonly fileRepo: Repository<StoredFile>,
     private readonly telegram: TelegramService,
+    private readonly storage: StorageService,
   ) {}
 
   async reconcileStoredFiles(dto: ReconcileRequestDto): Promise<ReconcileResponseDto> {
@@ -59,8 +61,7 @@ export class ReconcileService {
 
         staleFound++;
         if (!dryRun) {
-          await this.telegram.deleteChatMessage(file.telegramMessageId);
-          await this.fileRepo.remove(file);
+          await this.storage.deleteFile(file.id);
           removedFromDb++;
         }
 
