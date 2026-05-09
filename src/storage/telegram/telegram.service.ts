@@ -20,6 +20,7 @@ export class TelegramService implements OnModuleInit {
     filename: string,
     thumbnailJpeg?: Buffer,
   ): Promise<{
+    messageId: number;
     fileId: string;
     fileUniqueId: string;
     thumbnailFileId: string | null;
@@ -36,10 +37,23 @@ export class TelegramService implements OnModuleInit {
       throw new Error('Telegram không trả về document sau khi gửi');
     }
     return {
+      messageId: msg.message_id,
       fileId: doc.file_id,
       fileUniqueId: doc.file_unique_id,
       thumbnailFileId: doc.thumbnail?.file_id ?? null,
     };
+  }
+
+  /** Best-effort: không throw khi tin đã xóa hoặc bot không đủ quyền */
+  async deleteChatMessage(messageId: string | number | null | undefined): Promise<void> {
+    if (messageId === null || messageId === undefined) return;
+    const mid = typeof messageId === 'string' ? Number(messageId) : messageId;
+    if (!Number.isFinite(mid)) return;
+    try {
+      await this.bot.api.deleteMessage(this.chatId, mid);
+    } catch {
+      /* ignore */
+    }
   }
 
   getBotToken(): string {

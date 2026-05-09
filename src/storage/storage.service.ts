@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   ConflictException,
   Injectable,
   NotFoundException,
@@ -7,11 +8,11 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 import sharp from 'sharp';
 import { Repository } from 'typeorm';
-import { ROOT_FOLDER_ID } from './constants';
-import { CreateFolderDto } from './dto/create-folder.dto';
-import { Folder } from './entities/folder.entity';
-import { StoredFile } from './entities/stored-file.entity';
-import { TelegramService } from './telegram.service';
+import { ROOT_FOLDER_ID } from './domain/constants';
+import { CreateFolderDto } from './domain/dto/create-folder.dto';
+import { Folder } from './domain/entities/folder.entity';
+import { StoredFile } from './domain/entities/stored-file.entity';
+import { TelegramService } from './telegram/telegram.service';
 
 @Injectable()
 export class StorageService implements OnModuleInit {
@@ -82,6 +83,27 @@ export class StorageService implements OnModuleInit {
     return { folderId, folders, files };
   }
 
+  /**
+   * Kiểm tra thư mục + trùng tên trước khi enqueue (upload async).
+   * Trả 409 ngay nếu trùng tên; không xếp job vô ích.
+   */
+  async prepareAsyncUpload(folderIdParam: string | undefined, originalName: string): Promise<void> {
+    await this.ensureUploadTarget(folderIdParam, originalName);
+  }
+
+  private async ensureUploadTarget(
+    folderIdParam: string | undefined,
+    originalName: string,
+  ): Promise<string> {
+    const folderId = folderIdParam ? this.resolveFolderId(folderIdParam) : ROOT_FOLDER_ID;
+    await this.ensureFolder(folderId);
+    const dup = await this.fileRepo.findOne({ where: { folderId, name: originalName } });
+    if (dup) {
+      throw new ConflictException('Đã có file cùng tên trong thư mục');
+    }
+    return folderId;
+  }
+
   private async maybeThumbnail(buffer: Buffer, mime: string): Promise<Buffer | undefined> {
     if (!mime.startsWith('image/')) {
       return undefined;
@@ -109,13 +131,7 @@ export class StorageService implements OnModuleInit {
     mimeType: string,
     buffer: Buffer,
   ): Promise<StoredFile> {
-    const folderId = folderIdParam ? this.resolveFolderId(folderIdParam) : ROOT_FOLDER_ID;
-    await this.ensureFolder(folderId);
-
-    const dup = await this.fileRepo.findOne({ where: { folderId, name: originalName } });
-    if (dup) {
-      throw new ConflictException('Đã có file cùng tên trong thư mục');
-    }
+    const folderId = await this.ensureUploadTarget(folderIdParam, originalName);
 
     const thumb = await this.maybeThumbnail(buffer, mimeType);
     const uploaded = await this.telegram.uploadDocument(buffer, originalName, thumb);
@@ -128,8 +144,48 @@ export class StorageService implements OnModuleInit {
       telegramFileId: uploaded.fileId,
       telegramFileUniqueId: uploaded.fileUniqueId,
       thumbnailTelegramFileId: uploaded.thumbnailFileId,
+      telegramMessageId: String(uploaded.messageId),
     });
     return this.fileRepo.save(entity);
+  }
+
+  async deleteFile(id: string): Promise<void> {
+    const f = await this.getFile(id);
+    await this.removeFileFromDbAndTelegram(f);
+  }
+
+  /**
+   * Xóa thư mục và mọi thư mục con + file bên trong (đệ quy).
+   * Không cho xóa thư mục gốc ảo.
+   */
+  async deleteFolder(folderId: string): Promise<void> {
+    if (folderId === ROOT_FOLDER_ID) {
+      throw new BadRequestException('Không được xóa thư mục gốc');
+    }
+    await this.ensureFolder(folderId);
+
+    const children = await this.folderRepo.find({
+      where: { parentId: folderId },
+      order: { name: 'ASC' },
+    });
+    for (const child of children) {
+      await this.deleteFolder(child.id);
+    }
+
+    const files = await this.fileRepo.find({
+      where: { folderId },
+      order: { name: 'ASC' },
+    });
+    for (const f of files) {
+      await this.removeFileFromDbAndTelegram(f);
+    }
+
+    await this.folderRepo.delete({ id: folderId });
+  }
+
+  private async removeFileFromDbAndTelegram(f: StoredFile): Promise<void> {
+    await this.telegram.deleteChatMessage(f.telegramMessageId);
+    await this.fileRepo.remove(f);
   }
 
   async getFile(id: string): Promise<StoredFile> {

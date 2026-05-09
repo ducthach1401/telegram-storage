@@ -7,11 +7,18 @@ services:
     command: /bin/sh -c "npm install && npm run start:dev"
     working_dir: /app
     ports:
-      - "${PORT}:${PORT}"
+      - "${APP_PORT}:${APP_PORT}"
     env_file:
       - .env
     volumes:
       - .:/app
+    depends_on:
+      - mysql
+      - redis
+
+  redis:
+    image: redis:7-alpine
+    restart: always
 
   mysql:
     image: mysql:8.4

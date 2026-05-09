@@ -7,9 +7,16 @@ services:
       dockerfile: dockerfile
     restart: always
     ports:
-      - "${PORT}:${PORT}"
+      - "${APP_PORT}:${APP_PORT}"
     env_file:
       - .env
+    depends_on:
+      - mysql
+      - redis
+
+  redis:
+    image: redis:7-alpine
+    restart: always
 
   mysql:
     image: mysql:8.4

@@ -41,6 +41,10 @@ export class StoredFile {
   @Column({ type: 'varchar', nullable: true })
   thumbnailTelegramFileId: string | null;
 
+  /** message_id để deleteMessage trên chat lưu trữ (upload sau khi thêm cột mới) */
+  @Column({ type: 'bigint', nullable: true })
+  telegramMessageId: string | null;
+
   @CreateDateColumn()
   createdAt: Date;
 }
