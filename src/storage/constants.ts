@@ -1,0 +1,2 @@
+/** Thư mục gốc ảo — luôn tồn tại sau khi bootstrap */
+export const ROOT_FOLDER_ID = '00000000-0000-4000-8000-000000000001';
