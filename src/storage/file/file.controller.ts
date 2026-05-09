@@ -11,17 +11,20 @@ import {
   NotFoundException,
   Param,
   ParseUUIDPipe,
+  Patch,
   Post,
+  Query,
   Res,
   UploadedFile,
   UseInterceptors,
+  ValidationPipe,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import {
   ApiAcceptedResponse,
   ApiBadGatewayResponse,
-  ApiBadRequestResponse,
   ApiBody,
+  ApiConflictResponse,
   ApiConsumes,
   ApiNoContentResponse,
   ApiNotFoundResponse,
@@ -29,23 +32,52 @@ import {
   ApiOperation,
   ApiParam,
   ApiProduces,
+  ApiQuery,
   ApiTags,
 } from '@nestjs/swagger';
+import { validate as isUuid } from 'uuid';
 import { Queue } from 'bullmq';
 import { Response } from 'express';
 import { Readable } from 'stream';
+import { ApiExceptionMessage } from '../../common/api-messages';
 import { API_V1_PREFIX } from '../../common/api-route';
+import { ROOT_FOLDER_ALIAS, ROOT_FOLDER_ID } from '../domain/constants';
+import { parseDuplicateNamePolicy } from '../domain/duplicate-name-policy';
+import { DuplicatePolicyQueryDto } from '../domain/dto/duplicate-policy-query.dto';
+import { FileSearchQueryDto } from '../domain/dto/file-search-query.dto';
+import { FileSearchResponseDto } from '../domain/dto/file-search-response.dto';
+import { PatchFileDto } from '../domain/dto/patch-file.dto';
+import { EnvKey } from '../../common/env-keys';
+import {
+  CacheControlValue,
+  ContentDispositionMode,
+  HttpHeader,
+  MimeType,
+} from '../../common/http.constants';
+import { UploadDefaults } from '../../common/upload.defaults';
 import { FileMetaResponseDto } from '../domain/dto/file-meta-response.dto';
 import { StoredFileSummaryDto } from '../domain/dto/stored-file-summary.dto';
 import { UploadJobQueuedDto } from '../domain/dto/upload-job-queued.dto';
 import { UploadJobStatusDto } from '../domain/dto/upload-job-status.dto';
 import { StoredFile } from '../domain/entities/stored-file.entity';
 import { asyncUploadDiskStorage } from '../multer-async-disk.storage';
-import { FILE_UPLOAD_QUEUE } from '../queue/file-upload.constants';
+import {
+  BullMqJobState,
+  FILE_UPLOAD_JOB_NAME,
+  FILE_UPLOAD_QUEUE,
+} from '../queue/file-upload.constants';
 import type { FileUploadJobData } from '../queue/file-upload.processor';
 import { StorageService } from '../storage.service';
+import {
+  FileMultipart,
+  FileRouteParam,
+  FileRoutePath,
+} from '../storage-http.constants';
 
-function contentDisposition(mode: 'inline' | 'attachment', name: string): string {
+function contentDisposition(
+  mode: (typeof ContentDispositionMode)[keyof typeof ContentDispositionMode],
+  name: string,
+): string {
   const ascii = name.replace(/[^\x20-\x7E]/g, '_');
   return `${mode}; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(name)}`;
 }
@@ -58,20 +90,20 @@ export class FileController {
     @InjectQueue(FILE_UPLOAD_QUEUE) private readonly uploadQueue: Queue<FileUploadJobData>,
   ) {}
 
-  @Post('upload')
+  @Post(FileRoutePath.UPLOAD)
   @ApiOperation({ summary: 'Upload file (multipart)' })
   @ApiConsumes('multipart/form-data')
   @ApiBody({
     schema: {
       type: 'object',
-      required: ['file'],
+      required: [FileMultipart.FIELD_FILE],
       properties: {
-        file: {
+        [FileMultipart.FIELD_FILE]: {
           type: 'string',
           format: 'binary',
           description: 'Nội dung file',
         },
-        folderId: {
+        [FileMultipart.BODY_FOLDER_ID]: {
           type: 'string',
           format: 'uuid',
           nullable: true,
@@ -84,18 +116,29 @@ export class FileController {
     type: StoredFileSummaryDto,
     description: 'Metadata file sau khi lưu + đẩy Telegram',
   })
-  @UseInterceptors(FileInterceptor('file'))
+  @ApiConflictResponse({ description: 'Trùng tên khi duplicatePolicy=reject' })
+  @ApiQuery({ name: 'duplicatePolicy', required: false, enum: ['reject', 'overwrite', 'suffix'] })
+  @ApiQuery({ name: 'overwrite', required: false, description: 'true = như duplicatePolicy=overwrite' })
+  @UseInterceptors(FileInterceptor(FileMultipart.FIELD_FILE))
   async upload(
     @UploadedFile() file: Express.Multer.File | undefined,
-    @Body('folderId') folderId?: string,
+    @Query() dup: DuplicatePolicyQueryDto,
+    @Body(FileMultipart.BODY_FOLDER_ID) folderId?: string,
   ) {
     if (!file?.buffer) {
-      throw new BadRequestException('Thiếu file (form field `file`)');
+      throw new BadRequestException(ApiExceptionMessage.MISSING_MULTIPART_FILE);
     }
-    return this.storage.saveUploadedFile(folderId, file.originalname, file.mimetype, file.buffer);
+    const policy = parseDuplicateNamePolicy(dup.duplicatePolicy, dup.overwrite);
+    return this.storage.saveUploadedFile(
+      folderId,
+      file.originalname,
+      file.mimetype,
+      file.buffer,
+      policy,
+    );
   }
 
-  @Post('upload/async')
+  @Post(FileRoutePath.UPLOAD_ASYNC)
   @HttpCode(HttpStatus.ACCEPTED)
   @ApiOperation({
     summary: 'Upload file qua queue Redis (bulk / không chặn Telegram)',
@@ -106,10 +149,10 @@ export class FileController {
   @ApiBody({
     schema: {
       type: 'object',
-      required: ['file'],
+      required: [FileMultipart.FIELD_FILE],
       properties: {
-        file: { type: 'string', format: 'binary' },
-        folderId: {
+        [FileMultipart.FIELD_FILE]: { type: 'string', format: 'binary' },
+        [FileMultipart.BODY_FOLDER_ID]: {
           type: 'string',
           format: 'uuid',
           nullable: true,
@@ -122,46 +165,65 @@ export class FileController {
     type: UploadJobQueuedDto,
     description: 'Đã nhận file — xử lý nền',
   })
+  @ApiQuery({ name: 'duplicatePolicy', required: false, enum: ['reject', 'overwrite', 'suffix'] })
+  @ApiQuery({ name: 'overwrite', required: false })
   @UseInterceptors(
-    FileInterceptor('file', {
+    FileInterceptor(FileMultipart.FIELD_FILE, {
       storage: asyncUploadDiskStorage,
       limits: {
-        fileSize: Number(process.env.MAX_UPLOAD_MB ?? '50') * 1024 * 1024,
+        fileSize:
+          Number(
+            process.env[EnvKey.MAX_UPLOAD_MB] ??
+              String(UploadDefaults.MAX_UPLOAD_MB_FALLBACK),
+          ) *
+          1024 *
+          1024,
       },
     }),
   )
   async uploadAsync(
     @UploadedFile() file: Express.Multer.File | undefined,
-    @Body('folderId') folderId?: string,
+    @Query() dup: DuplicatePolicyQueryDto,
+    @Body(FileMultipart.BODY_FOLDER_ID) folderId?: string,
   ): Promise<UploadJobQueuedDto> {
     if (!file?.path) {
-      throw new BadRequestException('Thiếu file (form field `file`)');
+      throw new BadRequestException(ApiExceptionMessage.MISSING_MULTIPART_FILE);
     }
-    await this.storage.prepareAsyncUpload(folderId, file.originalname);
+    const policy = parseDuplicateNamePolicy(dup.duplicatePolicy, dup.overwrite);
+    const { finalFileName } = await this.storage.prepareAsyncUpload(
+      folderId,
+      file.originalname,
+      policy,
+    );
 
-    const job = await this.uploadQueue.add('persist', {
+    const job = await this.uploadQueue.add(FILE_UPLOAD_JOB_NAME, {
       tempPath: file.path,
       folderId,
-      originalName: file.originalname,
+      finalFileName,
       mimeType: file.mimetype,
     });
 
     if (job.id === undefined) {
-      throw new BadGatewayException('Không tạo được job trên queue');
+      throw new BadGatewayException(ApiExceptionMessage.QUEUE_JOB_CREATE_FAILED);
     }
 
     return { jobId: String(job.id) };
   }
 
-  @Get('upload/jobs/:jobId')
+  @Get(FileRoutePath.UPLOAD_JOB_STATUS)
   @ApiOperation({ summary: 'Trạng thái job upload async' })
-  @ApiParam({ name: 'jobId', description: 'Giá trị jobId từ POST upload/async' })
+  @ApiParam({
+    name: FileRouteParam.JOB_ID,
+    description: 'Giá trị jobId từ POST upload/async',
+  })
   @ApiOkResponse({ type: UploadJobStatusDto })
   @ApiNotFoundResponse({ description: 'Không có job' })
-  async uploadJobStatus(@Param('jobId') jobId: string): Promise<UploadJobStatusDto> {
+  async uploadJobStatus(
+    @Param(FileRouteParam.JOB_ID) jobId: string,
+  ): Promise<UploadJobStatusDto> {
     const job = await this.uploadQueue.getJob(jobId);
     if (!job) {
-      throw new NotFoundException('Không tìm thấy job');
+      throw new NotFoundException(ApiExceptionMessage.JOB_NOT_FOUND);
     }
 
     const state = await job.getState();
@@ -170,14 +232,72 @@ export class FileController {
       state,
     };
 
-    if (state === 'completed' && job.returnvalue != null) {
+    if (state === BullMqJobState.COMPLETED && job.returnvalue != null) {
       dto.result = FileController.toSummary(job.returnvalue as StoredFile);
     }
-    if (state === 'failed') {
+    if (state === BullMqJobState.FAILED) {
       dto.failedReason = job.failedReason ?? undefined;
     }
 
     return dto;
+  }
+
+  @Get(FileRoutePath.SEARCH)
+  @ApiOperation({
+    summary: 'Tìm file theo tên',
+    description:
+      'substring hoặc prefix; có thể lọc `folderId` (UUID hoặc root). Giới hạn `limit` (mặc định 50).',
+  })
+  @ApiOkResponse({ type: FileSearchResponseDto })
+  async search(@Query() query: FileSearchQueryDto): Promise<FileSearchResponseDto> {
+    const items = await this.storage.searchFiles({
+      q: query.q,
+      folderId: query.folderId,
+      mode: query.mode ?? 'substring',
+      limit: query.limit ?? 50,
+    });
+    return {
+      items: items.map((f) => FileController.toSummary(f)),
+    };
+  }
+
+  @Patch(':id')
+  @ApiOperation({
+    summary: 'Đổi tên / di chuyển file',
+    description:
+      'Chỉ cập nhật DB (Telegram file_id giữ nguyên). Query duplicatePolicy | overwrite giống upload.',
+  })
+  @ApiParam({ name: 'id', format: 'uuid' })
+  @ApiOkResponse({ type: StoredFileSummaryDto })
+  @ApiConflictResponse({ description: 'Trùng tên ở thư mục đích khi duplicatePolicy=reject' })
+  @ApiNotFoundResponse({ description: 'Không tìm thấy file' })
+  @ApiQuery({ name: 'duplicatePolicy', required: false, enum: ['reject', 'overwrite', 'suffix'] })
+  @ApiQuery({ name: 'overwrite', required: false })
+  async patchFile(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body(ValidationPipe) body: PatchFileDto,
+    @Query() dup: DuplicatePolicyQueryDto,
+  ): Promise<StoredFileSummaryDto> {
+    if (body.name === undefined && body.folderId === undefined) {
+      throw new BadRequestException(ApiExceptionMessage.PATCH_FILE_NO_CHANGE);
+    }
+    let resolvedFolder: string | undefined;
+    if (body.folderId !== undefined) {
+      if (body.folderId === ROOT_FOLDER_ALIAS) {
+        resolvedFolder = ROOT_FOLDER_ID;
+      } else if (!isUuid(body.folderId)) {
+        throw new BadRequestException(ApiExceptionMessage.INVALID_PATCH_FOLDER_ID);
+      } else {
+        resolvedFolder = body.folderId;
+      }
+    }
+    const policy = parseDuplicateNamePolicy(dup.duplicatePolicy, dup.overwrite);
+    const saved = await this.storage.patchFile(
+      id,
+      { name: body.name, folderId: resolvedFolder },
+      policy,
+    );
+    return FileController.toSummary(saved);
   }
 
   @Delete(':id')
@@ -220,7 +340,7 @@ export class FileController {
     @Param('id', ParseUUIDPipe) id: string,
     @Res({ passthrough: false }) res: Response,
   ) {
-    await this.pipeOriginal(id, res, 'attachment');
+    await this.pipeOriginal(id, res, ContentDispositionMode.ATTACHMENT);
   }
 
   /** Hiển thị trong trình duyệt (ảnh/PDF tùy MIME) */
@@ -233,7 +353,7 @@ export class FileController {
     @Param('id', ParseUUIDPipe) id: string,
     @Res({ passthrough: false }) res: Response,
   ) {
-    await this.pipeOriginal(id, res, 'inline');
+    await this.pipeOriginal(id, res, ContentDispositionMode.INLINE);
   }
 
   @Get(':id/thumbnail')
@@ -249,15 +369,17 @@ export class FileController {
     const f = await this.storage.getFile(id);
     const thumbId = f.thumbnailTelegramFileId;
     if (!thumbId) {
-      throw new NotFoundException('File không có thumbnail');
+      throw new NotFoundException(ApiExceptionMessage.FILE_NO_THUMBNAIL);
     }
     const url = await this.storage.getDownloadUrl(thumbId);
     const r = await fetch(url);
     if (!r.ok || !r.body) {
-      throw new BadGatewayException('Không tải được thumbnail từ Telegram');
+      throw new BadGatewayException(
+        ApiExceptionMessage.TELEGRAM_THUMB_DOWNLOAD_FAILED,
+      );
     }
-    res.setHeader('Content-Type', 'image/jpeg');
-    res.setHeader('Cache-Control', 'public, max-age=86400');
+    res.setHeader(HttpHeader.CONTENT_TYPE, MimeType.JPEG);
+    res.setHeader(HttpHeader.CACHE_CONTROL, CacheControlValue.PUBLIC_DAY);
     Readable.fromWeb(r.body as import('stream/web').ReadableStream).pipe(res);
   }
 
@@ -279,16 +401,21 @@ export class FileController {
   private async pipeOriginal(
     id: string,
     res: Response,
-    disposition: 'inline' | 'attachment',
+    disposition: (typeof ContentDispositionMode)[keyof typeof ContentDispositionMode],
   ) {
     const f = await this.storage.getFile(id);
     const url = await this.storage.getDownloadUrl(f.telegramFileId);
     const r = await fetch(url);
     if (!r.ok || !r.body) {
-      throw new BadGatewayException('Không tải được file từ Telegram');
+      throw new BadGatewayException(
+        ApiExceptionMessage.TELEGRAM_FILE_DOWNLOAD_FAILED,
+      );
     }
-    res.setHeader('Content-Type', f.mimeType);
-    res.setHeader('Content-Disposition', contentDisposition(disposition, f.name));
+    res.setHeader(HttpHeader.CONTENT_TYPE, f.mimeType);
+    res.setHeader(
+      HttpHeader.CONTENT_DISPOSITION,
+      contentDisposition(disposition, f.name),
+    );
     Readable.fromWeb(r.body as import('stream/web').ReadableStream).pipe(res);
   }
 }

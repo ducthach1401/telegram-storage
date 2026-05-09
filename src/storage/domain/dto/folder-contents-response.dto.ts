@@ -1,4 +1,4 @@
-import { ApiProperty } from "@nestjs/swagger";
+import { ApiProperty, ApiPropertyOptional } from "@nestjs/swagger";
 import { FolderResponseDto } from "./folder-response.dto";
 import { StoredFileSummaryDto } from "./stored-file-summary.dto";
 
@@ -14,4 +14,16 @@ export class FolderContentsResponseDto {
 
   @ApiProperty({ type: [StoredFileSummaryDto] })
   files: StoredFileSummaryDto[];
+
+  @ApiPropertyOptional({
+    nullable: true,
+    description:
+      "Cursor cho GET tiếp theo (kèm cùng fileLimit); null khi hết trang hoặc không phân trang.",
+  })
+  filesNextCursor?: string | null;
+
+  @ApiPropertyOptional({
+    description: "fileLimit đã dùng (chỉ khi phân trang file)",
+  })
+  filesLimit?: number;
 }

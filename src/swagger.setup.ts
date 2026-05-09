@@ -11,6 +11,10 @@ export function setupSwagger(app: INestApplication): void {
     .addTag("app", "Thông tin service")
     .addTag("folders", "Thư mục (drive)")
     .addTag("files", "Upload & truy cập file")
+    .addTag(
+      "admin",
+      "Queue BullMQ & reconcile DB ↔ Telegram (Basic Auth như mọi endpoint)",
+    )
     .addBasicAuth(
       {
         type: "http",

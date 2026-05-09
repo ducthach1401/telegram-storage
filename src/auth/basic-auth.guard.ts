@@ -7,9 +7,19 @@ import {
 import { ConfigService } from "@nestjs/config";
 import { timingSafeEqual } from "crypto";
 import type { Request, Response } from "express";
+import { ApiExceptionMessage } from "../common/api-messages";
+import { EnvKey } from "../common/env-keys";
+import {
+  BasicAuthWwwAuthenticateValue,
+  BufferEncoding,
+  HttpAuthScheme,
+  HttpHeader,
+  HttpIncomingHeader,
+  HttpMethod,
+} from "../common/http.constants";
 
 /**
- * Basic Auth luôn bật — user/password lấy từ `API_BASIC_AUTH_*` (bootstrap kiểm tra không rỗng).
+ * Basic Auth luôn bật — user/password lấy từ EnvKey.API_BASIC_AUTH_* (bootstrap kiểm tra không rỗng).
  */
 @Injectable()
 export class BasicAuthGuard implements CanActivate {
@@ -19,28 +29,29 @@ export class BasicAuthGuard implements CanActivate {
     const req = context.switchToHttp().getRequest<Request>();
     const res = context.switchToHttp().getResponse<Response>();
 
-    if (req.method === "OPTIONS") {
+    if (req.method === HttpMethod.OPTIONS) {
       return true;
     }
 
     const password = (
-      this.config.get<string>("API_BASIC_AUTH_PASSWORD") ?? ""
+      this.config.get<string>(EnvKey.API_BASIC_AUTH_PASSWORD) ?? ""
     ).trim();
     const expectedUser = (
-      this.config.get<string>("API_BASIC_AUTH_USER") ?? ""
+      this.config.get<string>(EnvKey.API_BASIC_AUTH_USER) ?? ""
     ).trim();
 
-    const authHeader = req.headers.authorization;
+    const authHeader = req.headers[HttpIncomingHeader.AUTHORIZATION];
 
-    if (!authHeader?.startsWith("Basic ")) {
+    if (!authHeader?.startsWith(HttpAuthScheme.BASIC_PREFIX)) {
       this.unauthorized(res);
     }
 
     let decoded: string;
     try {
-      decoded = Buffer.from(authHeader.slice(6).trim(), "base64").toString(
-        "utf8",
-      );
+      decoded = Buffer.from(
+        authHeader.slice(HttpAuthScheme.BASIC_PREFIX.length).trim(),
+        BufferEncoding.BASE64,
+      ).toString(BufferEncoding.UTF8);
     } catch {
       this.unauthorized(res);
     }
@@ -60,16 +71,13 @@ export class BasicAuthGuard implements CanActivate {
   }
 
   private unauthorized(res: Response): never {
-    res.setHeader(
-      "WWW-Authenticate",
-      'Basic realm="Telegram Storage API"',
-    );
-    throw new UnauthorizedException("Yêu cầu Basic Authorization");
+    res.setHeader(HttpHeader.WWW_AUTHENTICATE, BasicAuthWwwAuthenticateValue);
+    throw new UnauthorizedException(ApiExceptionMessage.BASIC_AUTH_REQUIRED);
   }
 
   private safeEqualUtf8(a: string, b: string): boolean {
-    const ba = Buffer.from(a, "utf8");
-    const bb = Buffer.from(b, "utf8");
+    const ba = Buffer.from(a, BufferEncoding.UTF8);
+    const bb = Buffer.from(b, BufferEncoding.UTF8);
     if (ba.length !== bb.length) {
       return false;
     }

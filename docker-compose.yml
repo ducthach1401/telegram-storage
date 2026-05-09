@@ -13,10 +13,20 @@ services:
     depends_on:
       - mysql
       - redis
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 1g
 
   redis:
     image: redis:7-alpine
     restart: always
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 128m
 
   mysql:
     image: mysql:8.4
@@ -25,8 +35,11 @@ services:
       - .env
     volumes:
       - mysql_data:/var/lib/mysql
-    ports:
-      - "${MYSQL_PUBLISH_PORT}:3306"
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 512m
 
 volumes:
   mysql_data:

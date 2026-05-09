@@ -1,59 +1,63 @@
 # Telegram Storage
 
-Backend **NestJS** lưu file và ảnh qua **Telegram Bot API**: cấu trúc thư mục kiểu “drive”, thumbnail cho ảnh, stream xem/tải qua API. Metadata và cây thư mục nằm trên **MySQL** (TypeORM).
+Backend **NestJS** lưu file qua **Telegram Bot API** (Grammy): thư mục kiểu drive, thumbnail ảnh, stream xem/tải. Metadata trên **MySQL** (TypeORM). Upload async bulk qua **Redis + BullMQ**.
 
 ## Stack
 
 - **NestJS 10**, **TypeORM**, **MySQL 8.4**, **Grammy**
+- **Redis 7**, **BullMQ** — queue upload `POST …/files/upload/async`
 - **Sharp** — thumbnail JPEG khi upload ảnh
-- **Swagger** — tài liệu OpenAPI tại `/api/documentation`
-- **Docker** — dev (`docker-compose.dev.yml`) & prod (`docker-compose.yml`), image prod chạy **PM2** (`pm2-runtime`)
+- **Swagger** — OpenAPI tại `/api/documentation`
+- **Docker** — `docker-compose.dev.yml` (dev) & `docker-compose.yml` (prod, PM2 `pm2-runtime`)
+
+Compose đặt **giới hạn CPU/RAM** cứng trong file YAML (`deploy.resources.limits`). MySQL **không publish cổng** ra host; Redis **không publish** cổng (chỉ network nội bộ).
 
 ## Yêu cầu
 
-- **Node.js 22** (khớp Docker dev/prod)
+- **Node.js 22**
 - **Docker & Docker Compose** (nếu chạy bằng compose)
 
 ## Cấu hình
 
-Sao chép `/.env.example` thành `/.env` và chỉnh giá trị thật (đặc biệt token Telegram và mật khẩu MySQL).
+Sao chép `.env.example` → `.env` và chỉnh giá trị thật (Telegram, MySQL, Basic Auth).
 
 | Biến | Ý nghĩa |
 |------|---------|
-| `COMPOSE_PROJECT_NAME` | Tên project Compose (tùy chọn, trong `.env`) |
+| `COMPOSE_PROJECT_NAME` | Tên project Compose (tùy chọn) |
 | `APP_PORT` | Cổng HTTP API |
-| `SERVICE_NAME` | Chuỗi trả về tại `GET /api/v1` |
-| `HOST` | Tuỳ chọn — bind HTTP; không có thì mặc định `0.0.0.0` (Docker) |
-| `TELEGRAM_BOT_TOKEN` | Token từ BotFather |
-| `TELEGRAM_STORAGE_CHAT_ID` | Chat/channel/group ID nơi bot được phép gửi file (thường `-100…`) |
-| `MAX_UPLOAD_MB` | Giới hạn upload multipart |
-| `MYSQL_*` | Host/port/user/password/database — trong Compose đặt `MYSQL_HOST=mysql` |
-| `MYSQL_ROOT_PASSWORD` | Cho container MySQL khởi tạo lần đầu |
-| `TYPEORM_SYNCHRONIZE` | `true` / `false` — dev có thể bật; production nên tắt khi có migration |
-| `MYSQL_PUBLISH_PORT` | Map cổng MySQL ra host (Compose dev/prod đều dùng) |
-| `API_BASIC_AUTH_USER` | Tuỳ chọn — user Basic Auth (mặc định `admin` khi đã bật auth) |
-| `API_BASIC_AUTH_PASSWORD` | Tuỳ chọn — đặt **không trống** để bật Basic Auth (API + Swagger) |
+| `SERVICE_NAME` | Chuỗi `GET /api/v1` |
+| `API_BASIC_AUTH_USER` | **Bắt buộc không rỗng** — user Basic Auth |
+| `API_BASIC_AUTH_PASSWORD` | **Bắt buộc không rỗng** — app không bootstrap nếu thiếu |
+| `TELEGRAM_BOT_TOKEN` | Token BotFather |
+| `TELEGRAM_STORAGE_CHAT_ID` | Chat/channel ID lưu file (thường `-100…`) |
+| `MAX_UPLOAD_MB` | Giới hạn multipart |
+| `REDIS_HOST`, `REDIS_PORT` | Redis queue — trong Compose: `redis` / `6379` |
+| `REDIS_PASSWORD` | Tuỳ chọn — Redis có auth |
+| `MYSQL_*` | Compose: `MYSQL_HOST=mysql`, `MYSQL_PORT=3306`, … |
+| `MYSQL_ROOT_PASSWORD` | Khởi tạo volume MySQL lần đầu |
+| `TYPEORM_SYNCHRONIZE` | `true` / `false` — prod nên `false` khi có migration |
 
-Chạy **ngoài Docker** nhưng DB trong Compose: đặt `MYSQL_HOST=127.0.0.1`, `MYSQL_PORT` khớp `MYSQL_PUBLISH_PORT`.
+Tuỳ chọn (mặc định trong code): `UPLOAD_TMP_DIR`, `UPLOAD_QUEUE_CONCURRENCY`.
+
+MySQL chỉ trong network Compose (`MYSQL_HOST=mysql`). Redis chỉ internal (`REDIS_HOST=redis`).
 
 ## Chạy local (không Docker)
 
 ```bash
 npm install
-cp .env.example .env   # rồi sửa
+cp .env.example .env
 npm run start:dev
 ```
 
-Build production cục bộ:
+Cần Redis & MySQL sẵn có và khớp biến `REDIS_*`, `MYSQL_*`.
+
+Build prod cục bộ:
 
 ```bash
-npm run build
-npm run start:prod
+npm run build && npm run start:prod
 ```
 
 ## Docker — development
-
-Mount source, `npm install` khi container khởi động, watch Nest:
 
 ```bash
 docker compose -f docker-compose.dev.yml up --build
@@ -61,60 +65,64 @@ docker compose -f docker-compose.dev.yml up --build
 
 ## Docker — production
 
-Build image (file `dockerfile`, multi-stage + PM2):
-
 ```bash
 docker compose up --build -d
 ```
 
 ## API & Swagger
 
-Sau khi chạy app, mở:
-
 - **Swagger UI:** `http://localhost:<APP_PORT>/api/documentation`
-- **OpenAPI JSON:** `http://localhost:<APP_PORT>/api/documentation/swagger.json`
+- **OpenAPI JSON:** `…/api/documentation/swagger.json`
 
-### Endpoint chính
+Prefix **`api/v1`** trong `src/common/api-route.ts` (không dùng `setGlobalPrefix` global).
 
-| Phương thức | Đường dẫn | Mô tả |
-|-------------|-----------|--------|
-| `GET` | `/api/v1` | Tên service (`SERVICE_NAME`, plain text) |
+### Endpoints chính
+
+| Phương thức | Đường dẫn | Ghi chú |
+|-------------|-----------|---------|
+| `GET` | `/api/v1` | Tên service (plain text) |
 | `POST` | `/api/v1/folders` | Tạo thư mục |
-| `GET` | `/api/v1/folders/:folderId/contents` | `folderId` = `root` hoặc UUID — liệt kê con |
-| `DELETE` | `/api/v1/folders/:folderId` | Xóa thư mục + con + file (UUID); không xóa gốc |
-| `POST` | `/api/v1/files/upload` | Multipart `file`, tuỳ chọn `folderId` |
-| `DELETE` | `/api/v1/files/:id` | Xóa metadata file + cố gắng xóa tin Telegram (`204`) |
-| `GET` | `/api/v1/files/:id` | Metadata file |
+| `GET` | `/api/v1/folders/:folderId/contents` | `folderId` = `root` hoặc UUID. Query tuỳ chọn `fileLimit`, `fileCursor` phân trang file |
+| `DELETE` | `/api/v1/folders/:folderId` | UUID — không xóa gốc |
+| `GET` | `/api/v1/files/search` | `q`, tuỳ chọn `folderId`, `mode`, `limit` |
+| `POST` | `/api/v1/files/upload` | Multipart `file`; query `duplicatePolicy` hoặc `overwrite=true` |
+| `POST` | `/api/v1/files/upload/async` | Queue Redis — query giống upload đồng bộ |
+| `GET` | `/api/v1/files/upload/jobs/:jobId` | Trạng thái job async |
+| `PATCH` | `/api/v1/files/:id` | Đổi tên / di chuyển — chỉ DB; query `duplicatePolicy` |
+| `DELETE` | `/api/v1/files/:id` | Xóa DB + best-effort Telegram (`204`) |
+| `GET` | `/api/v1/files/:id` | Metadata |
 | `GET` | `/api/v1/files/:id/view` | Xem inline |
 | `GET` | `/api/v1/files/:id/download` | Tải attachment |
 | `GET` | `/api/v1/files/:id/thumbnail` | Thumbnail JPEG (nếu có) |
+| `GET` | `/api/v1/admin/queue/stats` \| `/jobs` \| `/workers` | BullMQ |
+| `POST` | `/api/v1/admin/reconcile/files` | Body JSON reconcile Telegram ↔ DB |
 
-Prefix **`api/v1`** được khai báo trên từng controller qua `src/common/api-route.ts` (không dùng `setGlobalPrefix` trong bootstrap).
+**Upload — trùng tên:** query `duplicatePolicy=reject|overwrite|suffix` hoặc `overwrite=true`. **PATCH file** dùng cùng ý nghĩa khi đụng tên trong thư mục đích.
 
-Plugin **`@nestjs/swagger`** trong `nest-cli.json` bổ sung metadata OpenAPI cho file `*.dto.ts` (kết hợp `class-validator`).
+### Basic Auth
 
-### Basic Auth (một user)
+Luôn bật global guard: **hai biến Basic Auth không được để trống**. Swagger nút **Authorize** (`basic-auth`). `OPTIONS` không chặn (CORS).
 
-Đặt **`API_BASIC_AUTH_PASSWORD`** trong `.env` (không để trống) để bật guard toàn cục; **`API_BASIC_AUTH_USER`** mặc định là `admin`. Swagger có nút **Authorize** (scheme `basic-auth`). Preflight `OPTIONS` không chặn (CORS).
+## Cấu trúc `src/`
 
-## Cấu trúc mã (`src/`)
-
-- `app/` — module gốc, health/tên service
-- `storage/domain/` — entities, DTO, constants
-- `storage/telegram/` — gửi document & URL file Telegram
-- `storage/folder/`, `storage/file/` — controller REST
-- `storage/storage.service.ts`, `storage/storage.module.ts` — nghiệp vụ & wiring
-- `auth/basic-auth.guard.ts` — Basic Auth theo env (`APP_GUARD`)
-- `common/api-route.ts` — hằng `API_V1_PREFIX` (`api/v1`) dùng trên controller
-- `swagger.setup.ts` — đăng ký `/api/documentation`
+- `app/` — module gốc
+- `auth/` — Basic Auth guard
+- `common/` — env keys, HTTP helpers, API messages, `api-route.ts`
+- `storage/domain/` — entities, DTO, policy/cursor
+- `storage/telegram/` — Telegram Bot API
+- `storage/folder/`, `storage/file/` — REST
+- `storage/admin/` — queue + reconcile
+- `storage/queue/` — BullMQ processor & constants
+- `storage/storage.service.ts`, `storage.module.ts`
+- `swagger.setup.ts`
 
 ## Giới hạn & lưu ý
 
-- Giới hạn kích thước file phụ thuộc Telegram Bot API (thực tế thường quanh **~50MB** cho document).
-- File được bot đẩy lên chat lưu trữ; DB chỉ giữ **metadata** và `file_id` để tải lại.
-- Prod: nên `TYPEORM_SYNCHRONIZE=false` và dùng migration khi ổn định schema.
-- Xóa file trên Telegram dựa vào `telegramMessageId` (lưu từ lần upload); bản ghi cũ trước khi có cột này chỉ xóa DB. Bot cần quyền xóa tin trong chat lưu trữ.
+- Kích thước file phụ thuộc Telegram (~50MB document). `MAX_UPLOAD_MB` trên API nên không vượt quá.
+- Upload async cần Redis ổn định; job retry/backoff do BullMQ cấu hình trong `storage.module.ts`.
+- `telegramMessageId` cần để xóa tin trên Telegram; bản ghi cũ thiếu cột có thể chỉ xóa DB.
+- Prod: `TYPEORM_SYNCHRONIZE=false` + migration khi schema ổn định.
 
 ## Giấy phép
 
-Private project (`package.json`: `"private": true`).
+Private (`package.json`: `"private": true`).

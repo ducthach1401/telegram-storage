@@ -1,6 +1,12 @@
 import { Injectable, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Bot, InputFile } from 'grammy';
+import { TelegramIntegrationMessage } from '../../common/api-messages';
+import { EnvKey } from '../../common/env-keys';
+import {
+  TELEGRAM_DOCUMENT_THUMB_FILENAME,
+  TELEGRAM_FILE_API_BASE,
+} from '../telegram.constants';
 
 @Injectable()
 export class TelegramService implements OnModuleInit {
@@ -10,8 +16,8 @@ export class TelegramService implements OnModuleInit {
   constructor(private readonly config: ConfigService) {}
 
   onModuleInit() {
-    const token = this.config.getOrThrow<string>('TELEGRAM_BOT_TOKEN');
-    this.chatId = this.config.getOrThrow<string>('TELEGRAM_STORAGE_CHAT_ID');
+    const token = this.config.getOrThrow<string>(EnvKey.TELEGRAM_BOT_TOKEN);
+    this.chatId = this.config.getOrThrow<string>(EnvKey.TELEGRAM_STORAGE_CHAT_ID);
     this.bot = new Bot(token);
   }
 
@@ -27,14 +33,14 @@ export class TelegramService implements OnModuleInit {
   }> {
     const thumb =
       thumbnailJpeg && thumbnailJpeg.length > 0
-        ? new InputFile(thumbnailJpeg, 'thumb.jpg')
+        ? new InputFile(thumbnailJpeg, TELEGRAM_DOCUMENT_THUMB_FILENAME)
         : undefined;
     const msg = await this.bot.api.sendDocument(this.chatId, new InputFile(buffer, filename), {
       thumbnail: thumb,
     });
     const doc = msg.document;
     if (!doc) {
-      throw new Error('Telegram không trả về document sau khi gửi');
+      throw new Error(TelegramIntegrationMessage.NO_DOCUMENT_AFTER_SEND);
     }
     return {
       messageId: msg.message_id,
@@ -57,15 +63,28 @@ export class TelegramService implements OnModuleInit {
   }
 
   getBotToken(): string {
-    return this.config.getOrThrow<string>('TELEGRAM_BOT_TOKEN');
+    return this.config.getOrThrow<string>(EnvKey.TELEGRAM_BOT_TOKEN);
   }
 
   async getFileDownloadUrl(fileId: string): Promise<string> {
     const f = await this.bot.api.getFile(fileId);
     if (!f.file_path) {
-      throw new Error('Không lấy được file_path từ Telegram');
+      throw new Error(TelegramIntegrationMessage.NO_FILE_PATH);
     }
     const token = this.getBotToken();
-    return `https://api.telegram.org/file/bot${token}/${f.file_path}`;
+    return `${TELEGRAM_FILE_API_BASE}${token}/${f.file_path}`;
+  }
+
+  /**
+   * Kiểm tra `file_id` của document còn được Bot API phục vụ (getFile).
+   * Dùng cho reconcile — không throw khi token lỗi; chỉ false.
+   */
+  async isTelegramDocumentAccessible(fileId: string): Promise<boolean> {
+    try {
+      const f = await this.bot.api.getFile(fileId);
+      return Boolean(f.file_path);
+    } catch {
+      return false;
+    }
   }
 }
