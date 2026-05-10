@@ -176,18 +176,19 @@ export class FileController {
   @Post(`${FileRoutePath.TRASH}/:id/restore`)
   @ApiOperation({
     summary: 'Khôi phục file từ thùng rác',
-    description: 'Mặc định reject nếu tên cũ đang bị trùng; hỗ trợ duplicatePolicy/overwrite.',
+    description: 'Mặc định tự thêm hậu tố nếu tên cũ đang bị trùng; hỗ trợ duplicatePolicy/overwrite.',
   })
   @ApiParam({ name: 'id', format: 'uuid' })
   @ApiQuery({ name: 'duplicatePolicy', required: false, enum: ['reject', 'overwrite', 'suffix'] })
   @ApiQuery({ name: 'overwrite', required: false })
+  @ApiQuery({ name: 'allowDuplicateContent', required: false })
   @ApiOkResponse({ type: StoredFileSummaryDto })
   @ApiNotFoundResponse({ description: 'Không tìm thấy file trong thùng rác' })
   async restoreFromTrash(
     @Param('id', ParseUUIDPipe) id: string,
     @Query() dup: DuplicatePolicyQueryDto,
   ): Promise<StoredFileSummaryDto> {
-    const policy = parseDuplicateNamePolicy(dup.duplicatePolicy, dup.overwrite);
+    const policy = parseDuplicateNamePolicy(dup.duplicatePolicy ?? 'suffix', dup.overwrite);
     const restored = await this.storage.restoreFile(id, policy);
     return FileController.toSummary(restored);
   }
@@ -377,6 +378,7 @@ export class FileController {
   async uploadAsync(
     @UploadedFile() file: Express.Multer.File | undefined,
     @Query() dup: DuplicatePolicyQueryDto,
+    @Query('allowDuplicateContent') allowDuplicateContent?: string,
     @Body(FileMultipart.BODY_FOLDER_ID) folderId?: string,
   ): Promise<UploadJobQueuedDto> {
     if (!file?.path) {
@@ -394,6 +396,7 @@ export class FileController {
       folderId,
       finalFileName,
       mimeType: file.mimetype,
+      allowDuplicateContent: allowDuplicateContent === '1' || allowDuplicateContent === 'true',
     });
 
     if (job.id === undefined) {
@@ -676,6 +679,10 @@ export class FileController {
   }
 
   private static toSummary(f: StoredFile): StoredFileSummaryDto {
+    const skippedDuplicate = f as StoredFile & {
+      skippedDuplicate?: boolean;
+      skippedDuplicateReason?: string;
+    };
     return {
       id: f.id,
       folderId: f.folderId,
@@ -692,6 +699,8 @@ export class FileController {
       tags: StorageService.tagsToNames(f),
       canDirectDownload: FileController.canDirectDownload(f),
       telegramMessageUrl: FileController.telegramMessageUrl(f.telegramMessageId),
+      skippedDuplicate: skippedDuplicate.skippedDuplicate,
+      skippedDuplicateReason: skippedDuplicate.skippedDuplicateReason,
       createdAt: f.createdAt instanceof Date ? f.createdAt : new Date(f.createdAt as string),
     };
   }

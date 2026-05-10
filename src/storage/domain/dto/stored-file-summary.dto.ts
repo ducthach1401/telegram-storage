@@ -50,6 +50,12 @@ export class StoredFileSummaryDto {
   @ApiPropertyOptional({ description: "Link message Telegram để mở file trong channel khi file quá lớn" })
   telegramMessageUrl?: string;
 
+  @ApiPropertyOptional({ description: "Upload bị bỏ qua vì đã có file trùng nội dung trong cùng thư mục" })
+  skippedDuplicate?: boolean;
+
+  @ApiPropertyOptional({ description: "Lý do upload bị bỏ qua" })
+  skippedDuplicateReason?: string;
+
   @ApiProperty({ type: String, format: "date-time" })
   createdAt: Date;
 }

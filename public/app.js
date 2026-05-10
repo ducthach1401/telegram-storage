@@ -10,6 +10,13 @@ const UPLOAD_STORE_NAME = "uploads";
 const UPLOAD_RETRY_DELAY_MS = 15000;
 const objectUrlCache = new Map();
 
+function isCompactTransferMode() {
+  return (
+    window.matchMedia?.("(display-mode: standalone), (max-width: 640px), (hover: none), (pointer: coarse)").matches ??
+    false
+  );
+}
+
 const i18n = {
   vi: {
     brandSubtitle: "Cloud qua Telegram",
@@ -132,6 +139,11 @@ const i18n = {
     folderUploadDone: "Upload folder hoàn tất",
     uploadCompleted: "Upload hoàn tất",
     uploadFailed: "Upload lỗi",
+    duplicateImageTitle: "Ảnh đã tồn tại",
+    duplicateImageHint: "Ảnh này đã có trong cùng thư mục. Bạn muốn vẫn add thêm một bản mới hay bỏ qua và tắt tiến trình này?",
+    addDuplicateAnyway: "Vẫn add",
+    skipDuplicateUpload: "Bỏ qua",
+    duplicateSkipped: "Đã bỏ qua ảnh trùng",
     folderPickerUnsupported: "Trình duyệt này chưa hỗ trợ chọn folder không popup. Hãy kéo thả folder vào Drive.",
     folderCreated: "Đã tạo thư mục",
     copied: "Đã copy link",
@@ -276,6 +288,11 @@ const i18n = {
     folderUploadDone: "Folder upload completed",
     uploadCompleted: "Upload completed",
     uploadFailed: "Upload failed",
+    duplicateImageTitle: "Image already exists",
+    duplicateImageHint: "This image already exists in the same folder. Add another copy anyway, or skip it and remove this transfer?",
+    addDuplicateAnyway: "Add anyway",
+    skipDuplicateUpload: "Skip",
+    duplicateSkipped: "Duplicate image skipped",
     folderPickerUnsupported: "This browser does not support popup-free folder picking. Drag and drop the folder into Drive instead.",
     folderCreated: "Folder created",
     copied: "Link copied",
@@ -326,7 +343,7 @@ const state = {
   previewToken: 0,
   transfers: new Map(),
   transferAborters: new Map(),
-  transferCollapsed: false,
+  transferCollapsed: isCompactTransferMode(),
   transferAutoClearTimer: null,
   uploadProcessing: false,
   uploadRetryTimer: null,
@@ -424,10 +441,14 @@ function renderTransfers() {
   const panel = $("#transferPanel");
   const list = $("#transferList");
   const collapseButton = $("#transferCollapseButton");
-  const items = [...state.transfers.values()].slice(-8).reverse();
+  const items = [...state.transfers.values()].reverse();
+  const activeCount = items.filter(isActiveTransfer).length;
+  const compact = isCompactTransferMode();
   panel.classList.toggle("hidden", items.length === 0);
   panel.classList.toggle("collapsed", state.transferCollapsed);
-  collapseButton.textContent = state.transferCollapsed ? "+" : "−";
+  panel.classList.toggle("compact", compact);
+  collapseButton.setAttribute("aria-label", state.transferCollapsed ? t("transfers") : t("cancel"));
+  collapseButton.textContent = state.transferCollapsed && compact ? `↑${activeCount || items.length}` : state.transferCollapsed ? "+" : "−";
   list.innerHTML = "";
   items.forEach((item) => {
     const pct = item.total > 0 ? Math.min(100, Math.round((item.loaded / item.total) * 100)) : 0;
@@ -622,7 +643,16 @@ async function processUploadQueue() {
       try {
         const queued = await uploadFileRecord(record);
         updateTransfer(record.id, { status: t("processing"), speed: 0, error: false, cancelable: false });
-        await watchUploadJob(queued.jobId, record.id);
+        const result = await watchUploadJob(queued.jobId, record.id);
+        if (result === "addDuplicateAnyway") {
+          record.allowDuplicateContent = true;
+          record.status = "queued";
+          record.createdAt = Date.now();
+          delete record.retryAfter;
+          await putUploadRecord(record);
+          updateTransfer(record.id, { status: t("queued"), loaded: 0, total: record.file.size, speed: 0, cancelable: true, error: false });
+          continue;
+        }
         await deleteUploadRecord(record.id);
       } catch (err) {
         if (isTransferCanceled(err)) {
@@ -1255,6 +1285,10 @@ function renderFolders(folders) {
     makeDropTarget(btn, folder.id);
     btn.addEventListener("click", (event) => {
       event.preventDefault();
+      if (isTouchLikePointer()) {
+        void navigateToFolder(folder.id, folder.name).catch(showError);
+        return;
+      }
       toggleFolderSelection(folder.id, event);
     });
     btn.addEventListener("dblclick", () => {
@@ -1570,11 +1604,12 @@ function renderFileList(target, files, mode = "drive") {
     const tags = (file.tags || []).map((tag) => `<span class="tag">${escapeHtml(tag)}</span>`).join("");
     const uploadedAt = formatUploadedAt(file.createdAt);
     const cardMeta = [formatBytes(file.size), uploadedAt].filter(Boolean).join(" · ");
+    const displayName = compactFileNameForMobile(file.name);
     row.innerHTML = `
       <div class="file-main">
         <span class="file-thumb" data-file-id="${escapeHtml(file.id)}">${fileIcon(file)}</span>
         <div class="file-title">
-          <div class="file-name" title="${escapeHtml(file.name)}">${escapeHtml(file.name)}</div>
+          <div class="file-name" title="${escapeHtml(file.name)}">${escapeHtml(displayName)}</div>
           <div class="file-tags">${tags}</div>
           <div class="file-card-meta">${escapeHtml(cardMeta)}</div>
         </div>
@@ -1627,6 +1662,15 @@ function renderFileList(target, files, mode = "drive") {
 
 function isTouchLikePointer() {
   return window.matchMedia?.("(hover: none), (pointer: coarse)").matches ?? false;
+}
+
+function compactFileNameForMobile(name) {
+  const value = String(name || "");
+  if (!isTouchLikePointer() || value.length <= 28) return value;
+  const dot = value.lastIndexOf(".");
+  const ext = dot > 0 && value.length - dot <= 8 ? value.slice(dot) : "";
+  const headLength = ext ? 22 - ext.length : 25;
+  return `${value.slice(0, Math.max(10, headLength))}...${ext}`;
 }
 
 function attachContextMenu(row, menuButton, items) {
@@ -1709,10 +1753,12 @@ async function openFilePreview(file) {
   $("#viewerMeta").textContent = `${file.mimeType || ""} · ${formatBytes(file.size)}`;
   $("#viewerDownloadButton").onclick = () => void downloadWithAuth(downloadUrl, file.name).catch(showError);
   body.innerHTML = "";
+  body.className = "viewer-body";
   $("#viewerBackdrop").classList.remove("hidden");
   syncViewerNav();
 
   if (file.mimeType?.startsWith("image/")) {
+    body.classList.add("image-mode");
     const img = document.createElement("img");
     img.alt = file.name;
     img.className = "loading";
@@ -1817,11 +1863,19 @@ function createZoomableImagePreview(img) {
   wrap.append(stage, controls);
 
   let zoom = 1;
+  let panX = 0;
+  let panY = 0;
+  let pointerStart = null;
   let pinchStartDistance = 0;
   let pinchStartZoom = 1;
 
   const applyZoom = () => {
-    img.style.transform = `scale(${zoom})`;
+    if (zoom <= 1) {
+      panX = 0;
+      panY = 0;
+    }
+    stage.classList.toggle("pannable", zoom > 1);
+    img.style.transform = `translate(${panX}px, ${panY}px) scale(${zoom})`;
     zoomReset.textContent = `${Math.round(zoom * 100)}%`;
     zoomOut.disabled = zoom <= 0.5;
     zoomIn.disabled = zoom >= 5;
@@ -1845,24 +1899,62 @@ function createZoomableImagePreview(img) {
     { passive: false },
   );
   stage.addEventListener("dblclick", () => setZoom(zoom === 1 ? 2 : 1));
+  stage.addEventListener("pointerdown", (event) => {
+    if (zoom <= 1 || event.pointerType === "touch") return;
+    pointerStart = { x: event.clientX, y: event.clientY, panX, panY };
+    stage.setPointerCapture?.(event.pointerId);
+  });
+  stage.addEventListener("pointermove", (event) => {
+    if (!pointerStart) return;
+    event.preventDefault();
+    panX = pointerStart.panX + event.clientX - pointerStart.x;
+    panY = pointerStart.panY + event.clientY - pointerStart.y;
+    applyZoom();
+  });
+  stage.addEventListener("pointerup", () => {
+    pointerStart = null;
+  });
+  stage.addEventListener("pointercancel", () => {
+    pointerStart = null;
+  });
   stage.addEventListener(
     "touchstart",
     (event) => {
-      if (event.touches.length !== 2) return;
-      pinchStartDistance = touchDistance(event.touches);
-      pinchStartZoom = zoom;
+      if (event.touches.length === 2) {
+        pinchStartDistance = touchDistance(event.touches);
+        pinchStartZoom = zoom;
+        pointerStart = null;
+        return;
+      }
+      if (event.touches.length === 1 && zoom > 1) {
+        const touch = event.touches[0];
+        pointerStart = { x: touch.clientX, y: touch.clientY, panX, panY };
+      }
     },
     { passive: true },
   );
   stage.addEventListener(
     "touchmove",
     (event) => {
-      if (event.touches.length !== 2 || !pinchStartDistance) return;
-      event.preventDefault();
-      setZoom(pinchStartZoom * (touchDistance(event.touches) / pinchStartDistance));
+      if (event.touches.length === 2 && pinchStartDistance) {
+        event.preventDefault();
+        setZoom(pinchStartZoom * (touchDistance(event.touches) / pinchStartDistance));
+        return;
+      }
+      if (event.touches.length === 1 && pointerStart && zoom > 1) {
+        event.preventDefault();
+        const touch = event.touches[0];
+        panX = pointerStart.panX + touch.clientX - pointerStart.x;
+        panY = pointerStart.panY + touch.clientY - pointerStart.y;
+        applyZoom();
+      }
     },
     { passive: false },
   );
+  stage.addEventListener("touchend", () => {
+    pointerStart = null;
+    pinchStartDistance = 0;
+  });
   applyZoom();
   return wrap;
 }
@@ -1874,6 +1966,7 @@ function showTelegramFallback(file, previewToken = state.previewToken) {
   $("#viewerMeta").textContent = `${file.mimeType || ""} · ${formatBytes(file.size)}`;
   $("#viewerDownloadButton").onclick = () => openTelegramMessage(file);
   body.innerHTML = "";
+  body.className = "viewer-body";
   $("#viewerBackdrop").classList.remove("hidden");
   syncViewerNav();
   const fallback = document.createElement("div");
@@ -2017,7 +2110,9 @@ async function downloadWithAuth(url, filename) {
 function closeFilePreview() {
   state.previewToken++;
   $("#viewerBackdrop").classList.add("hidden");
-  $("#viewerBody").innerHTML = "";
+  const body = $("#viewerBody");
+  body.innerHTML = "";
+  body.className = "viewer-body";
   state.previewIndex = -1;
 }
 
@@ -2055,11 +2150,12 @@ async function openThumbnailPreview(file) {
   $("#viewerDownloadButton").onclick = () =>
     void downloadWithAuth(fileThumbnailUrl(file), `${file.name}.thumb.jpg`).catch(showError);
   body.innerHTML = "";
+  body.className = "viewer-body image-mode";
   $("#viewerBackdrop").classList.remove("hidden");
   const img = document.createElement("img");
   img.src = fileThumbnailUrl(file);
   img.alt = file.name;
-  body.appendChild(img);
+  body.appendChild(createZoomableImagePreview(img));
 }
 
 function setInternalDrag(element, item) {
@@ -2475,8 +2571,12 @@ async function uploadFileRecord(record) {
   const form = new FormData();
   form.append("file", record.file, record.fileName);
   if (record.folderId && record.folderId !== ROOT) form.append("folderId", record.folderId);
+  const params = new URLSearchParams({ duplicatePolicy: "suffix" });
+  if (record.allowDuplicateContent) {
+    params.set("allowDuplicateContent", "1");
+  }
   const queued = await uploadWithProgress(
-    "/files/upload/async?duplicatePolicy=suffix",
+    `/files/upload/async?${params.toString()}`,
     form,
     record.file,
     record.id,
@@ -2629,28 +2729,60 @@ async function uploadFolderEntries(rootName, entries) {
 }
 
 async function uploadDroppedItems(dataTransfer) {
-  const looseFiles = [];
+  const directFiles = Array.from(dataTransfer.files || []);
   const items = Array.from(dataTransfer.items || []);
+  const hasDirectoryEntry = items.some((item) => {
+    try {
+      const entry = typeof item.webkitGetAsEntry === "function" ? item.webkitGetAsEntry() : null;
+      return Boolean(entry?.isDirectory);
+    } catch {
+      return false;
+    }
+  });
+
+  if (directFiles.length && !hasDirectoryEntry) {
+    const files = uniqueDroppedFiles(directFiles);
+    toast(`${files.length} ${t("queued")}`);
+    await uploadFiles(files);
+    return;
+  }
+
+  const looseFiles = [];
   for (const item of items) {
-    const entry = typeof item.webkitGetAsEntry === "function" ? item.webkitGetAsEntry() : null;
-    if (entry?.isDirectory) {
-      const files = await readDirectoryEntry(entry);
-      await uploadFolderEntries(entry.name, files);
-    } else if (entry?.isFile) {
-      looseFiles.push(await readFileEntry(entry));
-    } else {
+    try {
+      const entry = typeof item.webkitGetAsEntry === "function" ? item.webkitGetAsEntry() : null;
+      if (entry?.isDirectory) {
+        const files = await readDirectoryEntry(entry);
+        await uploadFolderEntries(entry.name, files);
+      } else if (entry?.isFile) {
+        looseFiles.push(await readFileEntry(entry));
+      } else {
+        const file = item.getAsFile?.();
+        if (file) looseFiles.push(file);
+      }
+    } catch {
       const file = item.getAsFile?.();
       if (file) looseFiles.push(file);
     }
   }
 
-  if (!items.length) {
-    looseFiles.push(...Array.from(dataTransfer.files || []));
-  }
+  looseFiles.push(...directFiles);
 
   if (looseFiles.length) {
-    await uploadFiles(looseFiles);
+    const files = uniqueDroppedFiles(looseFiles);
+    toast(`${files.length} ${t("queued")}`);
+    await uploadFiles(files);
   }
+}
+
+function uniqueDroppedFiles(files) {
+  const seen = new Set();
+  return files.filter((file) => {
+    const key = `${file.name}:${file.size}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 async function readDirectoryEntry(directoryEntry, prefix = "") {
@@ -2703,19 +2835,38 @@ async function watchUploadJob(jobId, transferId) {
     await delay(attempt < 4 ? 1000 : 2500);
     const status = await api(`/files/upload/jobs/${encodeURIComponent(jobId)}`);
     if (status.state === "completed") {
+      if (status.result?.skippedDuplicate) {
+        const reason = status.result.skippedDuplicateReason || t("uploadFailed");
+        updateTransfer(transferId, { status: reason, error: false, speed: 0, cancelable: false });
+        const choice = await openChoiceModal({
+          title: t("duplicateImageTitle"),
+          description: `${t("duplicateImageHint")}\n\n${reason}`,
+          primaryLabel: t("addDuplicateAnyway"),
+          secondaryLabel: t("skipDuplicateUpload"),
+        });
+        await Promise.all([loadDrive(), loadQuota()]);
+        if (choice === "primary") {
+          return "addDuplicateAnyway";
+        }
+        state.transfers.delete(transferId);
+        renderTransfers();
+        toast(t("duplicateSkipped"));
+        return "skipDuplicate";
+      }
       finishTransfer(transferId, t("done"));
       toast(t("uploadCompleted"));
       await Promise.all([loadDrive(), loadQuota()]);
-      return;
+      return "completed";
     }
     if (status.state === "failed") {
       updateTransfer(transferId, { status: status.failedReason || t("uploadFailed"), error: true, speed: 0 });
       toast(`${t("uploadFailed")}: ${status.failedReason || jobId}`);
       await loadQueue().catch(() => undefined);
-      return;
+      return "failed";
     }
   }
   await loadQueue().catch(() => undefined);
+  return "timeout";
 }
 
 function delay(ms) {
@@ -3206,7 +3357,20 @@ function showError(err) {
 function registerServiceWorker() {
   if (!("serviceWorker" in navigator)) return;
   window.addEventListener("load", () => {
-    navigator.serviceWorker.register("/sw.js").catch(() => undefined);
+    navigator.serviceWorker
+      .register("/sw.js")
+      .then((registration) => {
+        registration.addEventListener("updatefound", () => {
+          const worker = registration.installing;
+          if (!worker) return;
+          worker.addEventListener("statechange", () => {
+            if (worker.state === "activated" && navigator.serviceWorker.controller) {
+              window.location.reload();
+            }
+          });
+        });
+      })
+      .catch(() => undefined);
   });
 }
 

@@ -1287,6 +1287,10 @@ button:disabled {
   border-bottom: 1px solid var(--line);
 }
 
+.viewer-head > div {
+  min-width: 0;
+}
+
 .viewer-head h3,
 .viewer-head p {
   margin: 0;
@@ -1320,8 +1324,8 @@ button:disabled {
   background: #f8fafc;
 }
 
-.viewer-body img,
-.viewer-body video {
+.viewer-body > img,
+.viewer-body > video {
   width: auto;
   height: auto;
   max-width: calc(100vw - 90px);
@@ -1333,21 +1337,44 @@ button:disabled {
 
 .image-preview {
   position: relative;
-  display: grid;
+  display: block;
   width: 100%;
   height: 100%;
   min-height: 0;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .image-preview-stage {
-  display: grid;
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
   min-height: 0;
-  place-items: center;
-  overflow: auto;
+  min-width: 0;
+  overflow: hidden;
   touch-action: none;
 }
 
+.image-preview-stage.pannable {
+  cursor: grab;
+}
+
+.image-preview-stage.pannable:active {
+  cursor: grabbing;
+}
+
 .image-preview-stage img {
+  display: block;
+  width: auto;
+  height: auto;
+  max-width: calc(100% - 28px);
+  max-height: calc(100% - 86px);
+  background: transparent;
+  object-fit: contain;
   transform-origin: center;
   transition: transform 0.12s ease;
   will-change: transform;
@@ -1647,7 +1674,16 @@ button:disabled {
 
   .modal-backdrop,
   .viewer-backdrop {
-    padding: 10px;
+    padding: max(8px, env(safe-area-inset-top)) max(8px, env(safe-area-inset-right))
+      max(8px, env(safe-area-inset-bottom)) max(8px, env(safe-area-inset-left));
+  }
+
+  .modal-backdrop {
+    place-items: stretch;
+  }
+
+  .viewer-backdrop {
+    place-items: center;
   }
 
   .modal,
@@ -1666,44 +1702,90 @@ button:disabled {
   }
 
   .viewer {
-    width: 100%;
-    max-width: calc(100vw - 20px);
-    height: calc(100dvh - 20px);
+    width: min(90vw, 520px);
+    max-width: calc(100vw - 16px);
+    height: min(80dvh, 760px);
+    max-height: calc(100dvh - 16px);
     border-radius: 18px;
   }
 
   .viewer-head {
-    align-items: stretch;
-    flex-direction: column;
-    gap: 10px;
-    padding: 12px;
+    align-items: center;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 8px;
+    padding: 10px;
+  }
+
+  .viewer-head > div {
+    flex: 1 1 auto;
+    min-width: 0;
   }
 
   .viewer-head h3 {
     max-width: 100%;
+    font-size: 15px;
+    line-height: 1.25;
+  }
+
+  .viewer-head p {
+    overflow: hidden;
+    font-size: 12px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .viewer-actions {
+    flex: 0 0 auto;
+    display: grid;
+    grid-template-columns: auto 40px;
     justify-content: stretch;
+    gap: 6px;
   }
 
   .viewer-actions > * {
-    flex: 1 1 auto;
+    flex: 0 0 auto;
+  }
+
+  #viewerDownloadButton {
+    max-width: 96px;
+    padding-inline: 12px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  #viewerCloseButton {
+    width: 40px;
+    height: 40px;
   }
 
   .viewer-body {
-    padding: 10px;
+    padding: 8px;
+    overflow: hidden;
   }
 
-  .viewer-body img,
-  .viewer-body video {
-    max-width: calc(100vw - 40px);
+  .viewer-body.image-mode {
+    padding: 0;
+  }
+
+  .viewer-body > img,
+  .viewer-body > video {
+    max-width: 100%;
     max-height: calc(100dvh - 180px);
   }
 
+  .image-preview-stage img {
+    width: auto;
+    height: auto;
+    max-width: calc(100% - 18px);
+    max-height: calc(100% - 82px);
+  }
+
   .image-zoom-controls {
-    right: 10px;
+    right: 50%;
     bottom: 10px;
+    transform: translateX(50%);
     max-width: calc(100vw - 40px);
     overflow-x: auto;
   }
@@ -1727,5 +1809,43 @@ button:disabled {
     bottom: 10px;
     left: 10px;
     width: auto;
+  }
+
+  .transfer-panel.compact.collapsed {
+    right: 14px;
+    bottom: 14px;
+    left: auto;
+    display: grid;
+    width: 58px;
+    height: 58px;
+    border-radius: 999px;
+    overflow: visible;
+  }
+
+  .transfer-panel.compact.collapsed .transfer-head {
+    display: grid;
+    width: 100%;
+    height: 100%;
+    padding: 0;
+    place-items: center;
+    border-bottom: 0;
+  }
+
+  .transfer-panel.compact.collapsed .transfer-head > strong,
+  .transfer-panel.compact.collapsed #transferClearButton {
+    display: none;
+  }
+
+  .transfer-panel.compact.collapsed .transfer-head-actions {
+    display: contents;
+  }
+
+  .transfer-panel.compact.collapsed #transferCollapseButton {
+    width: 58px;
+    height: 58px;
+    background: var(--primary);
+    color: #fff;
+    box-shadow: 0 14px 30px rgba(26, 115, 232, 0.28);
+    font-weight: 700;
   }
 }

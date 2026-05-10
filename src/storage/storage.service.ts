@@ -91,6 +91,10 @@ export interface StorageQuotaStats {
   byMimeType: Array<{ mimeType: string; files: number; bytes: number }>;
 }
 
+interface PersistUploadOptions {
+  allowDuplicateContent?: boolean;
+}
+
 const TELEGRAM_ONLY_MAX_BYTES = 20 * 1024 * 1024;
 const TELEGRAM_BACKUP_MAX_BYTES = 50 * 1024 * 1024;
 
@@ -465,20 +469,23 @@ export class StorageService implements OnModuleInit {
     fileName: string,
     mimeType: string,
     buffer: Buffer,
+    opts: PersistUploadOptions = {},
   ): Promise<StoredFile> {
     await this.ensureFolder(folderId);
     const dup = await this.fileRepo.findOne({
       where: { folderId, name: fileName, deletedAt: IsNull() },
     });
     if (dup) {
-      throw new ConflictException(StorageExceptionMessage.FILE_DUPLICATE_NAME);
+      fileName = await this.allocateSuffixName(folderId, fileName);
     }
 
     const size = buffer.length;
     const contentSha256 = StorageService.sha256Buffer(buffer);
-    const existingImage = await this.findActiveImageByContentHash(mimeType, contentSha256);
-    if (existingImage) {
-      return existingImage;
+    if (!opts.allowDuplicateContent) {
+      const existingImage = await this.findActiveImageByContentHash(folderId, mimeType, contentSha256);
+      if (existingImage) {
+        return StorageService.markSkippedDuplicate(existingImage);
+      }
     }
     const objectKey = this.shouldStoreInMinio(size) ? this.buildMinioObjectKey(fileName) : null;
     if (objectKey) {
@@ -523,7 +530,7 @@ export class StorageService implements OnModuleInit {
       thumbnailTelegramFileId: uploaded?.thumbnailFileId ?? null,
       telegramMessageId: uploaded ? String(uploaded.messageId) : null,
     });
-    return this.fileRepo.save(entity);
+    return this.saveFileEntityWithSuffixOnDuplicate(entity, folderId, fileName);
   }
 
   async persistUploadedDocumentFromPath(
@@ -532,19 +539,22 @@ export class StorageService implements OnModuleInit {
     mimeType: string,
     path: string,
     size: number,
+    opts: PersistUploadOptions = {},
   ): Promise<StoredFile> {
     await this.ensureFolder(folderId);
     const dup = await this.fileRepo.findOne({
       where: { folderId, name: fileName, deletedAt: IsNull() },
     });
     if (dup) {
-      throw new ConflictException(StorageExceptionMessage.FILE_DUPLICATE_NAME);
+      fileName = await this.allocateSuffixName(folderId, fileName);
     }
 
     const contentSha256 = await StorageService.sha256File(path);
-    const existingImage = await this.findActiveImageByContentHash(mimeType, contentSha256);
-    if (existingImage) {
-      return existingImage;
+    if (!opts.allowDuplicateContent) {
+      const existingImage = await this.findActiveImageByContentHash(folderId, mimeType, contentSha256);
+      if (existingImage) {
+        return StorageService.markSkippedDuplicate(existingImage);
+      }
     }
     const objectKey = this.shouldStoreInMinio(size) ? this.buildMinioObjectKey(fileName) : null;
     if (objectKey) {
@@ -591,7 +601,7 @@ export class StorageService implements OnModuleInit {
       thumbnailTelegramFileId: uploaded?.thumbnailFileId ?? null,
       telegramMessageId: uploaded ? String(uploaded.messageId) : null,
     });
-    return this.fileRepo.save(entity);
+    return this.saveFileEntityWithSuffixOnDuplicate(entity, folderId, fileName);
   }
 
   async searchFiles(params: FileSearchParams): Promise<StoredFile[]> {
@@ -847,7 +857,7 @@ export class StorageService implements OnModuleInit {
     file.deletedAt = null;
     file.deletedOriginalFolderId = null;
     file.deletedOriginalName = null;
-    return this.fileRepo.save(file);
+    return this.saveFileEntityWithSuffixOnDuplicate(file, targetFolderId, targetName);
   }
 
   async permanentlyDeleteFile(id: string): Promise<void> {
@@ -950,7 +960,40 @@ export class StorageService implements OnModuleInit {
     });
   }
 
+  async allocateFileSuffixName(folderId: string, desiredName: string): Promise<string> {
+    return this.allocateSuffixName(folderId, desiredName);
+  }
+
+  private async saveFileEntityWithSuffixOnDuplicate(
+    entity: StoredFile,
+    folderId: string,
+    desiredName: string,
+  ): Promise<StoredFile> {
+    try {
+      return await this.fileRepo.save(entity);
+    } catch (err) {
+      if (!StorageService.isDuplicateEntryError(err)) {
+        throw err;
+      }
+      entity.name = await this.allocateSuffixName(folderId, desiredName);
+      return this.fileRepo.save(entity);
+    }
+  }
+
+  private static isDuplicateEntryError(err: unknown): boolean {
+    if (typeof err !== 'object' || err === null) {
+      return false;
+    }
+    const maybe = err as { code?: string; errno?: number; message?: string };
+    return (
+      maybe.code === 'ER_DUP_ENTRY' ||
+      maybe.errno === 1062 ||
+      String(maybe.message || '').includes('Duplicate entry')
+    );
+  }
+
   private async findActiveImageByContentHash(
+    folderId: string,
     mimeType: string,
     contentSha256: string,
   ): Promise<StoredFile | null> {
@@ -961,11 +1004,20 @@ export class StorageService implements OnModuleInit {
       .createQueryBuilder('f')
       .leftJoinAndSelect('f.tags', 'tag')
       .where('f.deletedAt IS NULL')
+      .andWhere('f.folderId = :folderId', { folderId })
       .andWhere('f.contentSha256 = :contentSha256', { contentSha256 })
       .andWhere('f.mimeType LIKE :imagePrefix', { imagePrefix: `${MIME_PREFIX_IMAGE}%` })
       .orderBy('f.createdAt', TYPEORM_ORDER_ASC)
       .addOrderBy('f.id', TYPEORM_ORDER_ASC)
       .getOne();
+  }
+
+  private static markSkippedDuplicate(file: StoredFile): StoredFile {
+    Object.assign(file, {
+      skippedDuplicate: true,
+      skippedDuplicateReason: 'Ảnh đã tồn tại trong thư mục',
+    });
+    return file;
   }
 
   private async getTrashedFile(id: string): Promise<StoredFile> {

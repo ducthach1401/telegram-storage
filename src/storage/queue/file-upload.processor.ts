@@ -19,6 +19,7 @@ export interface FileUploadJobData {
   /** Tên file sau xử lý trùng (reject/overwrite/suffix) trước khi enqueue */
   finalFileName: string;
   mimeType: string;
+  allowDuplicateContent?: boolean;
 }
 
 const workerConcurrency = Math.max(
@@ -41,7 +42,7 @@ export class FileUploadProcessor extends WorkerHost {
   }
 
   async process(job: Job<FileUploadJobData>): Promise<StoredFile> {
-    const { tempPath, folderId, finalFileName, mimeType } = job.data;
+    const { tempPath, folderId, finalFileName, mimeType, allowDuplicateContent } = job.data;
     const fileStat = await stat(tempPath);
     const folderResolved = this.storage.uploadTargetFolderId(folderId);
     const saved = await this.persistWithPermanentErrorCheck(
@@ -50,6 +51,7 @@ export class FileUploadProcessor extends WorkerHost {
       mimeType,
       tempPath,
       fileStat.size,
+      Boolean(allowDuplicateContent),
     );
     await unlink(tempPath).catch((err) =>
       this.log.warn(`Không xóa được file tạm ${tempPath}: ${String(err)}`),
@@ -63,6 +65,7 @@ export class FileUploadProcessor extends WorkerHost {
     mimeType: string,
     tempPath: string,
     size: number,
+    allowDuplicateContent: boolean,
   ): Promise<StoredFile> {
     try {
       return await this.storage.persistUploadedDocumentFromPath(
@@ -71,6 +74,7 @@ export class FileUploadProcessor extends WorkerHost {
         mimeType,
         tempPath,
         size,
+        { allowDuplicateContent },
       );
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -79,14 +83,22 @@ export class FileUploadProcessor extends WorkerHost {
           'Telegram Bot token không hợp lệ hoặc đã bị revoke (401 Unauthorized). Kiểm tra TELEGRAM_BOT_TOKEN trong .env rồi restart container.',
         );
       }
-      if (message.includes(StorageExceptionMessage.FILE_DUPLICATE_NAME)) {
-        const existing = await this.storage.findActiveFileByName(folderId, finalFileName);
-        if (existing) {
-          this.log.log(
-            `Upload job bỏ qua file trùng tên: ${finalFileName} trong folder ${folderId}`,
-          );
-          return existing;
-        }
+      if (
+        message.includes(StorageExceptionMessage.FILE_DUPLICATE_NAME) ||
+        message.includes('Duplicate entry')
+      ) {
+        const suffixName = await this.storage.allocateFileSuffixName(folderId, finalFileName);
+        this.log.log(
+          `Upload job đổi tên file trùng: ${finalFileName} -> ${suffixName} trong folder ${folderId}`,
+        );
+        return this.storage.persistUploadedDocumentFromPath(
+          folderId,
+          suffixName,
+          mimeType,
+          tempPath,
+          size,
+          { allowDuplicateContent },
+        );
       }
       throw err;
     }
