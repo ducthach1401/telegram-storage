@@ -53,10 +53,12 @@ export class BasicAuthGuard implements CanActivate {
       this.config.get<string>(EnvKey.API_BASIC_AUTH_USER) ?? ""
     ).trim();
 
-    const authHeader = req.headers[HttpIncomingHeader.AUTHORIZATION];
+    const authHeader =
+      req.headers[HttpIncomingHeader.AUTHORIZATION] ??
+      this.authHeaderFromCookie(req.headers.cookie);
 
     if (!authHeader?.startsWith(HttpAuthScheme.BASIC_PREFIX)) {
-      this.unauthorized(res);
+      this.unauthorized(req, res);
     }
 
     let decoded: string;
@@ -66,7 +68,7 @@ export class BasicAuthGuard implements CanActivate {
         BufferEncoding.BASE64,
       ).toString(BufferEncoding.UTF8);
     } catch {
-      this.unauthorized(res);
+      this.unauthorized(req, res);
     }
 
     const colon = decoded.indexOf(":");
@@ -77,15 +79,29 @@ export class BasicAuthGuard implements CanActivate {
       !this.safeEqualUtf8(user, expectedUser) ||
       !this.safeEqualUtf8(pass, password)
     ) {
-      this.unauthorized(res);
+      this.unauthorized(req, res);
     }
 
     return true;
   }
 
-  private unauthorized(res: Response): never {
-    res.setHeader(HttpHeader.WWW_AUTHENTICATE, BasicAuthWwwAuthenticateValue);
+  private unauthorized(req: Request, res: Response): never {
+    if (req.headers['x-auth-mode'] !== 'app' && req.query.appAuth !== '1') {
+      res.setHeader(HttpHeader.WWW_AUTHENTICATE, BasicAuthWwwAuthenticateValue);
+    }
     throw new UnauthorizedException(ApiExceptionMessage.BASIC_AUTH_REQUIRED);
+  }
+
+  private authHeaderFromCookie(cookieHeader: string | undefined): string | undefined {
+    const raw = cookieHeader
+      ?.split(';')
+      .map((part) => part.trim())
+      .find((part) => part.startsWith('tg_drive_auth='))
+      ?.slice('tg_drive_auth='.length);
+    if (!raw) {
+      return undefined;
+    }
+    return `${HttpAuthScheme.BASIC_PREFIX}${decodeURIComponent(raw)}`;
   }
 
   private safeEqualUtf8(a: string, b: string): boolean {

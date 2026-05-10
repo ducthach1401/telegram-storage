@@ -1,13 +1,16 @@
 import { Module } from "@nestjs/common";
 import { ConfigModule, ConfigService } from "@nestjs/config";
-import { APP_FILTER, APP_GUARD } from "@nestjs/core";
+import { APP_FILTER, APP_GUARD, APP_INTERCEPTOR } from "@nestjs/core";
 import { TypeOrmModule } from "@nestjs/typeorm";
 import { ScheduleModule } from "@nestjs/schedule";
 import { ThrottlerModule } from "@nestjs/throttler";
+import { OgmaInterceptor, OgmaModule } from "@ogma/nestjs-module";
+import { ExpressParser } from "@ogma/platform-express";
 import { MysqlBackupSchedulerService } from "../backup/mysql-backup.scheduler";
 import { BasicAuthGuard } from "../auth/basic-auth.guard";
 import { ShareRouteThrottlerGuard } from "../auth/share-throttler.guard";
 import { EnvKey } from "../common/env-keys";
+import { FileTag } from "../storage/domain/entities/file-tag.entity";
 import { Folder } from "../storage/domain/entities/folder.entity";
 import { StoredFile } from "../storage/domain/entities/stored-file.entity";
 import { StorageModule } from "../storage/storage.module";
@@ -18,6 +21,11 @@ import { TelegramAlertExceptionFilter } from "./telegram-alert-exception.filter"
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true }),
+    OgmaModule.forRoot({
+      application: "telegram-storage",
+      color: process.env.NODE_ENV !== "production",
+      json: process.env.NODE_ENV === "production",
+    }),
     ScheduleModule.forRoot(),
     TypeOrmModule.forRootAsync({
       imports: [ConfigModule],
@@ -30,7 +38,7 @@ import { TelegramAlertExceptionFilter } from "./telegram-alert-exception.filter"
         password: config.getOrThrow<string>(EnvKey.MYSQL_PASSWORD),
         database: config.getOrThrow<string>(EnvKey.MYSQL_DATABASE),
         charset: "utf8mb4",
-        entities: [Folder, StoredFile],
+        entities: [Folder, StoredFile, FileTag],
         synchronize:
           config.getOrThrow<string>(EnvKey.TYPEORM_SYNCHRONIZE) === "true",
       }),
@@ -59,6 +67,11 @@ import { TelegramAlertExceptionFilter } from "./telegram-alert-exception.filter"
   providers: [
     AppService,
     MysqlBackupSchedulerService,
+    ExpressParser,
+    {
+      provide: APP_INTERCEPTOR,
+      useClass: OgmaInterceptor,
+    },
     {
       provide: APP_GUARD,
       useClass: ShareRouteThrottlerGuard,

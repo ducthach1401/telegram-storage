@@ -36,7 +36,8 @@ Sao chép `.env.example` → `.env` và chỉnh giá trị thật (Telegram, MyS
 | `TELEGRAM_ALERT_CHAT_ID` | Chat/channel nhận **cảnh báo lỗi** (HTTP ≥500, job upload queue fail sau hết retry). Có thể **trùng** `TELEGRAM_STORAGE_CHAT_ID` — cùng kênh lưu file. Để trống = không gửi cảnh báo qua Telegram |
 | `TELEGRAM_WEBHOOK_SECRET` | Tuỳ chọn — nếu set, webhook phải gửi header `X-Telegram-Bot-Api-Secret-Token` trùng giá trị (khớp khi `setWebhook`) |
 | `TELEGRAM_SYNC_FOLDER_ID` | Tuỳ chọn — `root` hoặc UUID thư mục đích cho document đồng bộ ngược; để trống = root |
-| `MAX_UPLOAD_MB` | Giới hạn multipart |
+| `MINIO_ENDPOINT`, `MINIO_REGION`, `MINIO_ACCESS_KEY`, `MINIO_SECRET_KEY`, `MINIO_BUCKET` | Cấu hình MinIO/S3 cho file lớn |
+| `MINIO_LIMIT_GB` | Giới hạn dung lượng MinIO hiển thị và kiểm tra khi upload (mặc định 50GB) |
 | `FOLDER_ZIP_MAX_FILES` | Tuỳ chọn — tối đa số file trong một lần ZIP (sync hoặc queue); mặc định 2000 trong code, trần 50000 |
 | `FOLDER_ZIP_DOWNLOAD_TOKEN_TTL_SECONDS` | TTL token tải ZIP async (60–604800; mặc định 3600) |
 | `SHARE_RATE_LIMIT_TTL_MS`, `SHARE_RATE_LIMIT_MAX` | Cửa sổ và số request tối đa cho `/shared/files*` và `/folders/download/stream` |
@@ -148,7 +149,7 @@ Global guard: **Basic Auth** cho hầu hết route (hai biến env không đư�
 - **Import MySQL qua API:** `POST /api/v1/admin/mysql/import` dùng lệnh `mysql` (cùng `mariadb-client` như backup). Dev image không có CLI thì endpoint thất bại với thông báo thiếu `mysql`; giới hạn kích thước `MYSQL_IMPORT_MAX_MB`.
 - **Copy thư mục:** nhiều bản ghi có thể trỏ cùng `telegram_message_id` — xóa một bản chỉ gọi `deleteMessage` khi không còn bản ghi nào khác trỏ tin đó (reconcile dùng `deleteFile` nên cùng logic).
 - **Cảnh báo Telegram:** chỉ bật khi đặt `TELEGRAM_ALERT_CHAT_ID`. Chỉ gửi cho lỗi **HTTP ≥500** (và mọi lỗi không bắt được như 500); lỗi 4xx (validation, 404, auth…) **không** gửi để tránh spam. Upload async thất bại **sau khi hết retry** cũng được gửi một tin.
-- Kích thước file phụ thuộc Telegram (~50MB document). `MAX_UPLOAD_MB` trên API nên không vượt quá.
+- File `<20MB` lưu Telegram; file `20–50MB` lưu MinIO và backup Telegram; file `>50MB` chỉ lưu MinIO. Giới hạn MinIO mặc định 50GB qua `MINIO_LIMIT_GB`.
 - Upload async cần Redis ổn định; job retry/backoff do BullMQ cấu hình trong `storage.module.ts`.
 - `telegramMessageId` cần để xóa tin trên Telegram; bản ghi cũ thiếu cột có thể chỉ xóa DB.
 - Prod: `TYPEORM_SYNCHRONIZE=false` + migration khi schema ổn định.

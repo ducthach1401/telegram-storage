@@ -1,7 +1,7 @@
 import { OnWorkerEvent, Processor, WorkerHost } from '@nestjs/bullmq';
 import { Logger } from '@nestjs/common';
-import { Job } from 'bullmq';
-import { readFile, unlink } from 'fs/promises';
+import { Job, UnrecoverableError } from 'bullmq';
+import { stat, unlink } from 'fs/promises';
 import { StoredFile } from '../domain/entities/stored-file.entity';
 import { TelegramService } from '../telegram/telegram.service';
 import { StorageService } from '../storage.service';
@@ -41,13 +41,14 @@ export class FileUploadProcessor extends WorkerHost {
 
   async process(job: Job<FileUploadJobData>): Promise<StoredFile> {
     const { tempPath, folderId, finalFileName, mimeType } = job.data;
-    const buffer = await readFile(tempPath);
+    const fileStat = await stat(tempPath);
     const folderResolved = this.storage.uploadTargetFolderId(folderId);
-    const saved = await this.storage.persistUploadedDocument(
+    const saved = await this.persistWithPermanentErrorCheck(
       folderResolved,
       finalFileName,
       mimeType,
-      buffer,
+      tempPath,
+      fileStat.size,
     );
     await unlink(tempPath).catch((err) =>
       this.log.warn(`Không xóa được file tạm ${tempPath}: ${String(err)}`),
@@ -55,11 +56,42 @@ export class FileUploadProcessor extends WorkerHost {
     return saved;
   }
 
-  /** Sau lần thử cuối — dọn file tạm nếu process không unlink được (lỗi sau readFile). */
+  private async persistWithPermanentErrorCheck(
+    folderId: string,
+    finalFileName: string,
+    mimeType: string,
+    tempPath: string,
+    size: number,
+  ): Promise<StoredFile> {
+    try {
+      return await this.storage.persistUploadedDocumentFromPath(
+        folderId,
+        finalFileName,
+        mimeType,
+        tempPath,
+        size,
+      );
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (message.includes('401: Unauthorized')) {
+        throw new UnrecoverableError(
+          'Telegram Bot token không hợp lệ hoặc đã bị revoke (401 Unauthorized). Kiểm tra TELEGRAM_BOT_TOKEN trong .env rồi restart container.',
+        );
+      }
+      throw err;
+    }
+  }
+
+  /** Sau lần thử cuối — giữ file tạm để admin có thể retry/re-upload job failed. */
   @OnWorkerEvent(BullMqWorkerEvent.FAILED)
   async onFailed(job: Job<FileUploadJobData>): Promise<void> {
     const maxAttempts = job.opts.attempts ?? 1;
     if (job.attemptsMade < maxAttempts) {
+      this.log.warn(
+        `Upload job ${String(job.id)} lỗi, sẽ retry (${job.attemptsMade}/${maxAttempts}): ${
+          job.failedReason ?? '(không có failedReason)'
+        }`,
+      );
       return;
     }
     const reason = job.failedReason ?? '(không có failedReason)';
@@ -69,12 +101,9 @@ export class FileUploadProcessor extends WorkerHost {
         `jobId: ${String(job.id)}`,
         `file: ${job.data.finalFileName}`,
         `mimeType: ${job.data.mimeType}`,
+        'File tạm được giữ lại để admin retry/re-upload qua API queue.',
         reason,
       ].join('\n'),
-    );
-    const { tempPath } = job.data;
-    await unlink(tempPath).catch((err) =>
-      this.log.warn(`Không xóa được file tạm sau failed: ${tempPath}: ${String(err)}`),
     );
   }
 }

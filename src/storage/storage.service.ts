@@ -1,4 +1,8 @@
 import {
+  createHash,
+  randomUUID,
+} from 'crypto';
+import {
   BadGatewayException,
   BadRequestException,
   ConflictException,
@@ -8,21 +12,24 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
-import archiver from 'archiver';
+import type archiver = require('archiver');
 import { createReadStream, createWriteStream } from 'fs';
-import { mkdir, unlink } from 'fs/promises';
+import { mkdir, readFile, unlink } from 'fs/promises';
+import { request as httpsRequest } from 'https';
 import { dirname, join } from 'path';
 import type { Response } from 'express';
 import { finished } from 'stream/promises';
 import { Readable } from 'stream';
 import sharp from 'sharp';
-import { In, Repository } from 'typeorm';
+import { In, IsNull, Not, Repository } from 'typeorm';
 import {
   ApiExceptionMessage,
   StorageExceptionMessage,
 } from '../common/api-messages';
 import { EnvKey } from '../common/env-keys';
+import { telegramDownloadMaxBytes } from '../common/upload.defaults';
 import {
+  CacheControlValue,
   ContentDispositionMode,
   HttpHeader,
   MimeType,
@@ -36,6 +43,7 @@ import {
 } from './domain/constants';
 import type { DuplicateNamePolicy } from './domain/duplicate-name-policy';
 import { CreateFolderDto } from './domain/dto/create-folder.dto';
+import { FileTag } from './domain/entities/file-tag.entity';
 import { Folder } from './domain/entities/folder.entity';
 import { StoredFile } from './domain/entities/stored-file.entity';
 import {
@@ -45,6 +53,7 @@ import {
   encodeFolderListCursor,
 } from './domain/file-list-cursor';
 import { contentDispositionHeader } from './content-disposition.header';
+import { MinioStorageService } from './s3/minio-storage.service';
 import { TelegramService } from './telegram/telegram.service';
 
 export interface ListContentsOpts {
@@ -56,6 +65,43 @@ export interface ListContentsOpts {
   folderCursor?: string;
 }
 
+export interface FileSearchParams {
+  q?: string;
+  folderId?: string;
+  mode: 'substring' | 'prefix';
+  limit: number;
+  mimeType?: string;
+  mimePrefix?: string;
+  minSize?: number;
+  maxSize?: number;
+  createdFrom?: string;
+  createdTo?: string;
+  hasThumbnail?: boolean;
+  tags?: string[];
+}
+
+export interface StorageQuotaStats {
+  totalFiles: number;
+  totalFolders: number;
+  totalBytes: number;
+  trashedFiles: number;
+  trashedBytes: number;
+  minioBytes: number;
+  minioLimitBytes: number;
+  byMimeType: Array<{ mimeType: string; files: number; bytes: number }>;
+}
+
+const TELEGRAM_ONLY_MAX_BYTES = 20 * 1024 * 1024;
+const TELEGRAM_BACKUP_MAX_BYTES = 50 * 1024 * 1024;
+
+const { ZipArchive } = require('archiver') as {
+  ZipArchive: new (options?: archiver.ArchiverOptions) => archiver.Archiver;
+};
+
+function createZipArchive(): archiver.Archiver {
+  return new ZipArchive({ zlib: { level: 6 } });
+}
+
 @Injectable()
 export class StorageService implements OnModuleInit {
   constructor(
@@ -63,7 +109,10 @@ export class StorageService implements OnModuleInit {
     private readonly folderRepo: Repository<Folder>,
     @InjectRepository(StoredFile)
     private readonly fileRepo: Repository<StoredFile>,
+    @InjectRepository(FileTag)
+    private readonly tagRepo: Repository<FileTag>,
     private readonly telegram: TelegramService,
+    private readonly minio: MinioStorageService,
     private readonly config: ConfigService,
   ) {}
 
@@ -93,7 +142,7 @@ export class StorageService implements OnModuleInit {
   }
 
   async ensureFolder(id: string): Promise<Folder> {
-    const folder = await this.folderRepo.findOne({ where: { id } });
+    const folder = await this.folderRepo.findOne({ where: { id, deletedAt: IsNull() } });
     if (!folder) {
       throw new NotFoundException(StorageExceptionMessage.FOLDER_NOT_FOUND);
     }
@@ -104,7 +153,7 @@ export class StorageService implements OnModuleInit {
     const parentId = dto.parentId ?? ROOT_FOLDER_ID;
     await this.ensureFolder(parentId);
     const exists = await this.folderRepo.findOne({
-      where: { parentId, name: dto.name },
+      where: { parentId, name: dto.name, deletedAt: IsNull() },
     });
     if (exists) {
       throw new ConflictException(StorageExceptionMessage.FOLDER_DUPLICATE_NAME);
@@ -126,7 +175,7 @@ export class StorageService implements OnModuleInit {
     }
     await this.ensureFolder(parentId);
     const existing = await this.folderRepo.findOne({
-      where: { parentId, name },
+      where: { parentId, name, deletedAt: IsNull() },
     });
     if (existing) {
       return existing.id;
@@ -159,13 +208,14 @@ export class StorageService implements OnModuleInit {
 
     if (!folderLimit) {
       folders = await this.folderRepo.find({
-        where: { parentId: folderId },
+        where: { parentId: folderId, deletedAt: IsNull() },
         order: { name: TYPEORM_ORDER_ASC },
       });
     } else {
       const fq = this.folderRepo
         .createQueryBuilder('d')
         .where('d.parentId = :folderId', { folderId })
+        .andWhere('d.deletedAt IS NULL')
         .orderBy('d.name', TYPEORM_ORDER_ASC)
         .addOrderBy('d.id', TYPEORM_ORDER_ASC)
         .take(folderLimit + 1);
@@ -191,13 +241,14 @@ export class StorageService implements OnModuleInit {
     const limit = opts?.fileLimit;
     if (!limit) {
       const files = await this.fileRepo.find({
-        where: { folderId },
+        where: { folderId, deletedAt: IsNull() },
+        relations: { tags: true },
         order: { name: TYPEORM_ORDER_ASC },
       });
       return {
         folderId,
         folders,
-        files,
+        files: this.decorateFilesForClient(files),
         ...(foldersNextCursor !== undefined
           ? { foldersNextCursor, foldersLimit }
           : {}),
@@ -206,7 +257,9 @@ export class StorageService implements OnModuleInit {
 
     const qb = this.fileRepo
       .createQueryBuilder('f')
+      .leftJoinAndSelect('f.tags', 'tag')
       .where('f.folderId = :folderId', { folderId })
+      .andWhere('f.deletedAt IS NULL')
       .orderBy('f.name', TYPEORM_ORDER_ASC)
       .addOrderBy('f.id', TYPEORM_ORDER_ASC)
       .take(limit + 1);
@@ -230,7 +283,7 @@ export class StorageService implements OnModuleInit {
     return {
       folderId,
       folders,
-      files,
+      files: this.decorateFilesForClient(files),
       ...(foldersNextCursor !== undefined
         ? { foldersNextCursor, foldersLimit }
         : {}),
@@ -251,7 +304,7 @@ export class StorageService implements OnModuleInit {
     return { finalFileName: effectiveName };
   }
 
-  private async resolveUploadTarget(
+  async resolveUploadTarget(
     folderIdParam: string | undefined,
     desiredName: string,
     policy: DuplicateNamePolicy,
@@ -259,7 +312,9 @@ export class StorageService implements OnModuleInit {
     const folderId = folderIdParam ? this.resolveFolderId(folderIdParam) : ROOT_FOLDER_ID;
     await this.ensureFolder(folderId);
 
-    const dup = await this.fileRepo.findOne({ where: { folderId, name: desiredName } });
+    const dup = await this.fileRepo.findOne({
+      where: { folderId, name: desiredName, deletedAt: IsNull() },
+    });
     if (!dup) {
       return { folderId, effectiveName: desiredName };
     }
@@ -290,13 +345,28 @@ export class StorageService implements OnModuleInit {
     for (let n = 1; n <= 9999; n++) {
       const candidate = `${stem} (${n})${ext}`;
       const exists = await this.fileRepo.exist({
-        where: { folderId, name: candidate },
+        where: { folderId, name: candidate, deletedAt: IsNull() },
       });
       if (!exists) {
         return candidate;
       }
     }
     throw new ConflictException(StorageExceptionMessage.FILE_SUFFIX_EXHAUSTED);
+  }
+
+  private async allocateFolderSuffixName(parentId: string, desiredName: string): Promise<string> {
+    const exists = await this.folderRepo.exist({
+      where: { parentId, name: desiredName, deletedAt: IsNull() },
+    });
+    if (!exists) return desiredName;
+    for (let n = 1; n <= 9999; n++) {
+      const candidate = `${desiredName} (${n})`;
+      const taken = await this.folderRepo.exist({
+        where: { parentId, name: candidate, deletedAt: IsNull() },
+      });
+      if (!taken) return candidate;
+    }
+    throw new ConflictException(StorageExceptionMessage.FOLDER_DUPLICATE_NAME);
   }
 
   private async maybeThumbnail(buffer: Buffer, mime: string): Promise<Buffer | undefined> {
@@ -318,6 +388,60 @@ export class StorageService implements OnModuleInit {
     } catch {
       return undefined;
     }
+  }
+
+  private shouldStoreInTelegram(size: number): boolean {
+    return size <= TELEGRAM_BACKUP_MAX_BYTES;
+  }
+
+  private shouldStoreInMinio(size: number): boolean {
+    return size >= TELEGRAM_ONLY_MAX_BYTES;
+  }
+
+  private buildMinioObjectKey(fileName: string): string {
+    const cleanName = fileName.replace(/[^\w.\-()+ ]+/g, '_').slice(-180) || 'file';
+    return `files/${new Date().toISOString().slice(0, 10)}/${randomUUID()}-${cleanName}`;
+  }
+
+  private async assertMinioCapacity(incomingBytes: number): Promise<void> {
+    if (!this.minio.isEnabled()) {
+      throw new BadGatewayException('File >= 20MB cần cấu hình MinIO/S3');
+    }
+    const used = await this.minioUsedBytes();
+    const limit = this.minio.limitBytes();
+    if (used + incomingBytes > limit) {
+      throw new BadRequestException({
+        message: 'MinIO đã vượt giới hạn dung lượng',
+        usedBytes: used,
+        incomingBytes,
+        limitBytes: limit,
+      });
+    }
+  }
+
+  private async minioUsedBytes(): Promise<number> {
+    const rows = await this.fileRepo
+      .createQueryBuilder('f')
+      .select('f.s3ObjectKey', 'objectKey')
+      .addSelect('MAX(f.size)', 'bytes')
+      .where('f.s3ObjectKey IS NOT NULL')
+      .groupBy('f.s3ObjectKey')
+      .getRawMany<{ objectKey: string; bytes: string }>();
+    return rows.reduce((sum, row) => sum + Number(row.bytes || 0), 0);
+  }
+
+  private static sha256Buffer(buffer: Buffer): string {
+    return createHash('sha256').update(buffer).digest('hex');
+  }
+
+  private static sha256File(path: string): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const hash = createHash('sha256');
+      const stream = createReadStream(path);
+      stream.on('data', (chunk) => hash.update(chunk));
+      stream.on('error', reject);
+      stream.on('end', () => resolve(hash.digest('hex')));
+    });
   }
 
   async saveUploadedFile(
@@ -343,52 +467,180 @@ export class StorageService implements OnModuleInit {
     buffer: Buffer,
   ): Promise<StoredFile> {
     await this.ensureFolder(folderId);
-    const dup = await this.fileRepo.findOne({ where: { folderId, name: fileName } });
+    const dup = await this.fileRepo.findOne({
+      where: { folderId, name: fileName, deletedAt: IsNull() },
+    });
     if (dup) {
       throw new ConflictException(StorageExceptionMessage.FILE_DUPLICATE_NAME);
     }
 
-    const thumb = await this.maybeThumbnail(buffer, mimeType);
-    const uploaded = await this.telegram.uploadDocument(buffer, fileName, thumb);
+    const size = buffer.length;
+    const contentSha256 = StorageService.sha256Buffer(buffer);
+    const objectKey = this.shouldStoreInMinio(size) ? this.buildMinioObjectKey(fileName) : null;
+    if (objectKey) {
+      await this.assertMinioCapacity(size);
+    }
+
+    let uploaded:
+      | {
+          fileId: string;
+          fileUniqueId: string;
+          thumbnailFileId?: string | null;
+          messageId: number;
+        }
+      | null = null;
+    try {
+      if (objectKey) {
+        await this.minio.putBuffer({
+          objectKey,
+          buffer,
+          contentType: mimeType,
+        });
+      }
+      if (this.shouldStoreInTelegram(size)) {
+        const thumb = await this.maybeThumbnail(buffer, mimeType);
+        uploaded = await this.telegram.uploadDocument(buffer, fileName, thumb);
+      }
+    } catch (err) {
+      await this.minio.deleteObject(objectKey).catch(() => undefined);
+      throw err;
+    }
 
     const entity = this.fileRepo.create({
       folderId,
       name: fileName,
       mimeType,
-      size: buffer.length,
-      telegramFileId: uploaded.fileId,
-      telegramFileUniqueId: uploaded.fileUniqueId,
-      thumbnailTelegramFileId: uploaded.thumbnailFileId,
-      telegramMessageId: String(uploaded.messageId),
+      size,
+      telegramFileId: uploaded?.fileId ?? null,
+      telegramFileUniqueId: uploaded?.fileUniqueId ?? null,
+      contentSha256,
+      s3Bucket: objectKey ? this.minio.getBucket() : null,
+      s3ObjectKey: objectKey,
+      thumbnailTelegramFileId: uploaded?.thumbnailFileId ?? null,
+      telegramMessageId: uploaded ? String(uploaded.messageId) : null,
     });
     return this.fileRepo.save(entity);
   }
 
-  async searchFiles(params: {
-    q: string;
-    folderId?: string;
-    mode: 'substring' | 'prefix';
-    limit: number;
-  }): Promise<StoredFile[]> {
-    const limit = Math.min(Math.max(params.limit, 1), 200);
-    const escaped = params.q.replace(/\\/g, '\\\\').replace(/%/g, '\\%').replace(/_/g, '\\_');
-    const pat = params.mode === 'prefix' ? `${escaped}%` : `%${escaped}%`;
+  async persistUploadedDocumentFromPath(
+    folderId: string,
+    fileName: string,
+    mimeType: string,
+    path: string,
+    size: number,
+  ): Promise<StoredFile> {
+    await this.ensureFolder(folderId);
+    const dup = await this.fileRepo.findOne({
+      where: { folderId, name: fileName, deletedAt: IsNull() },
+    });
+    if (dup) {
+      throw new ConflictException(StorageExceptionMessage.FILE_DUPLICATE_NAME);
+    }
 
+    const contentSha256 = await StorageService.sha256File(path);
+    const objectKey = this.shouldStoreInMinio(size) ? this.buildMinioObjectKey(fileName) : null;
+    if (objectKey) {
+      await this.assertMinioCapacity(size);
+    }
+
+    let uploaded:
+      | {
+          fileId: string;
+          fileUniqueId: string;
+          thumbnailFileId?: string | null;
+          messageId: number;
+        }
+      | null = null;
+    try {
+      if (objectKey) {
+        await this.minio.putFileFromPath({
+          objectKey,
+          path,
+          contentType: mimeType,
+          contentLength: size,
+        });
+      }
+      if (this.shouldStoreInTelegram(size)) {
+        const buffer = await readFile(path);
+        const thumb = await this.maybeThumbnail(buffer, mimeType);
+        uploaded = await this.telegram.uploadDocument(buffer, fileName, thumb);
+      }
+    } catch (err) {
+      await this.minio.deleteObject(objectKey).catch(() => undefined);
+      throw err;
+    }
+
+    const entity = this.fileRepo.create({
+      folderId,
+      name: fileName,
+      mimeType,
+      size,
+      telegramFileId: uploaded?.fileId ?? null,
+      telegramFileUniqueId: uploaded?.fileUniqueId ?? null,
+      contentSha256,
+      s3Bucket: objectKey ? this.minio.getBucket() : null,
+      s3ObjectKey: objectKey,
+      thumbnailTelegramFileId: uploaded?.thumbnailFileId ?? null,
+      telegramMessageId: uploaded ? String(uploaded.messageId) : null,
+    });
+    return this.fileRepo.save(entity);
+  }
+
+  async searchFiles(params: FileSearchParams): Promise<StoredFile[]> {
+    const limit = Math.min(Math.max(params.limit, 1), 200);
     const qb = this.fileRepo
       .createQueryBuilder('f')
-      .where('f.name LIKE :pat ESCAPE :esc', {
-        pat,
-        esc: '\\',
-      })
+      .leftJoinAndSelect('f.tags', 'tag')
+      .where('f.deletedAt IS NULL')
       .orderBy('f.name', TYPEORM_ORDER_ASC)
       .addOrderBy('f.id', TYPEORM_ORDER_ASC)
       .take(limit);
+
+    if (params.q?.trim()) {
+      const escaped = params.q.replace(/\\/g, '\\\\').replace(/%/g, '\\%').replace(/_/g, '\\_');
+      const pat = params.mode === 'prefix' ? `${escaped}%` : `%${escaped}%`;
+      qb.andWhere('f.name LIKE :pat ESCAPE :esc', {
+        pat,
+        esc: '\\',
+      });
+    }
 
     if (params.folderId !== undefined && params.folderId !== '') {
       const fid = this.resolveFolderId(params.folderId);
       await this.ensureFolder(fid);
       qb.andWhere('f.folderId = :fid', { fid });
     }
+    if (params.mimeType?.trim()) {
+      qb.andWhere('f.mimeType = :mimeType', { mimeType: params.mimeType.trim() });
+    }
+    if (params.mimePrefix?.trim()) {
+      qb.andWhere('f.mimeType LIKE :mimePrefix', { mimePrefix: `${params.mimePrefix.trim()}%` });
+    }
+    if (params.minSize !== undefined) {
+      qb.andWhere('f.size >= :minSize', { minSize: params.minSize });
+    }
+    if (params.maxSize !== undefined) {
+      qb.andWhere('f.size <= :maxSize', { maxSize: params.maxSize });
+    }
+    if (params.createdFrom) {
+      qb.andWhere('f.createdAt >= :createdFrom', { createdFrom: new Date(params.createdFrom) });
+    }
+    if (params.createdTo) {
+      qb.andWhere('f.createdAt <= :createdTo', { createdTo: new Date(params.createdTo) });
+    }
+    if (params.hasThumbnail === true) {
+      qb.andWhere('f.thumbnailTelegramFileId IS NOT NULL');
+    }
+    if (params.hasThumbnail === false) {
+      qb.andWhere('f.thumbnailTelegramFileId IS NULL');
+    }
+    const tags = StorageService.normalizeTags(params.tags ?? []);
+    tags.forEach((tagName, idx) => {
+      const alias = `filterTag${idx}`;
+      qb.innerJoin('f.tags', alias, `${alias}.name = :tag${idx}`, {
+        [`tag${idx}`]: tagName,
+      });
+    });
 
     return qb.getMany();
   }
@@ -413,7 +665,7 @@ export class StorageService implements OnModuleInit {
     }
 
     let dup = await this.fileRepo.findOne({
-      where: { folderId: targetFolderId, name: targetName },
+      where: { folderId: targetFolderId, name: targetName, deletedAt: IsNull() },
     });
     if (dup?.id === file.id) {
       dup = null;
@@ -435,9 +687,171 @@ export class StorageService implements OnModuleInit {
     return this.fileRepo.save(file);
   }
 
+  async getStorageQuotaStats(): Promise<StorageQuotaStats> {
+    const active = await this.fileRepo
+      .createQueryBuilder('f')
+      .select('COUNT(*)', 'files')
+      .addSelect('COALESCE(SUM(f.size), 0)', 'bytes')
+      .where('f.deletedAt IS NULL')
+      .andWhere('f.telegramFileId IS NOT NULL')
+      .getRawOne<{ files: string; bytes: string }>();
+
+    const trashed = await this.fileRepo
+      .createQueryBuilder('f')
+      .select('COUNT(*)', 'files')
+      .addSelect('COALESCE(SUM(f.size), 0)', 'bytes')
+      .where('f.deletedAt IS NOT NULL')
+      .andWhere('f.telegramFileId IS NOT NULL')
+      .getRawOne<{ files: string; bytes: string }>();
+
+    const byMimeTypeRaw = await this.fileRepo
+      .createQueryBuilder('f')
+      .select('f.mimeType', 'mimeType')
+      .addSelect('COUNT(*)', 'files')
+      .addSelect('COALESCE(SUM(f.size), 0)', 'bytes')
+      .where('f.deletedAt IS NULL')
+      .andWhere('f.telegramFileId IS NOT NULL')
+      .groupBy('f.mimeType')
+      .orderBy('bytes', 'DESC')
+      .limit(50)
+      .getRawMany<{ mimeType: string; files: string; bytes: string }>();
+
+    const totalFolders = await this.folderRepo.count({
+      where: { id: Not(ROOT_FOLDER_ID), deletedAt: IsNull() },
+    });
+    const minioBytes = await this.minioUsedBytes();
+
+    return {
+      totalFiles: Number(active?.files ?? 0),
+      totalFolders,
+      totalBytes: Number(active?.bytes ?? 0),
+      trashedFiles: Number(trashed?.files ?? 0),
+      trashedBytes: Number(trashed?.bytes ?? 0),
+      minioBytes,
+      minioLimitBytes: this.minio.limitBytes(),
+      byMimeType: byMimeTypeRaw.map((row) => ({
+        mimeType: row.mimeType,
+        files: Number(row.files),
+        bytes: Number(row.bytes),
+      })),
+    };
+  }
+
+  async setFileTags(id: string, rawTags: string[]): Promise<StoredFile> {
+    const file = await this.getFile(id);
+    const names = StorageService.normalizeTags(rawTags);
+    const tags: FileTag[] = [];
+    for (const name of names) {
+      let tag = await this.tagRepo.findOne({ where: { name } });
+      if (!tag) {
+        tag = await this.tagRepo.save(this.tagRepo.create({ name }));
+      }
+      tags.push(tag);
+    }
+    file.tags = tags;
+    return this.fileRepo.save(file);
+  }
+
+  async getFileTags(id: string): Promise<string[]> {
+    const file = await this.getFile(id);
+    return StorageService.tagsToNames(file);
+  }
+
   async deleteFile(id: string): Promise<void> {
     const f = await this.getFile(id);
-    await this.removeFileFromDbAndTelegram(f);
+    f.deletedAt = new Date();
+    f.deletedOriginalFolderId = f.folderId;
+    f.deletedOriginalName = f.name;
+    f.name = this.buildTrashFileName(f);
+    await this.fileRepo.save(f);
+  }
+
+  async listTrashedFiles(limit = 100): Promise<StoredFile[]> {
+    return this.fileRepo.find({
+      where: { deletedAt: Not(IsNull()) },
+      relations: { tags: true },
+      order: { deletedAt: 'DESC' },
+      take: Math.min(Math.max(limit, 1), 200),
+    });
+  }
+
+  async listTrashedFolders(limit = 100): Promise<Folder[]> {
+    return this.folderRepo.find({
+      where: { deletedAt: Not(IsNull()) },
+      order: { deletedAt: 'DESC' },
+      take: Math.min(Math.max(limit, 1), 200),
+    });
+  }
+
+  async restoreFile(id: string, policy: DuplicateNamePolicy): Promise<StoredFile> {
+    const file = await this.getTrashedFile(id);
+    let targetFolderId = file.deletedOriginalFolderId ?? file.folderId;
+    const targetFolderExists = await this.folderRepo.exist({ where: { id: targetFolderId } });
+    if (!targetFolderExists) {
+      targetFolderId = ROOT_FOLDER_ID;
+    }
+    let targetName = file.deletedOriginalName ?? file.name;
+    const dup = await this.fileRepo.findOne({
+      where: { folderId: targetFolderId, name: targetName, deletedAt: IsNull() },
+    });
+    if (dup) {
+      if (policy === 'reject') {
+        throw new ConflictException(StorageExceptionMessage.FILE_DUPLICATE_NAME);
+      }
+      if (policy === 'overwrite') {
+        await this.removeFileFromDbAndTelegram(dup);
+      } else {
+        targetName = await this.allocateSuffixName(targetFolderId, targetName);
+      }
+    }
+
+    file.folderId = targetFolderId;
+    file.name = targetName;
+    file.deletedAt = null;
+    file.deletedOriginalFolderId = null;
+    file.deletedOriginalName = null;
+    return this.fileRepo.save(file);
+  }
+
+  async permanentlyDeleteFile(id: string): Promise<void> {
+    const file = await this.getTrashedFile(id);
+    await this.removeFileFromDbAndTelegram(file);
+  }
+
+  async restoreFolder(id: string): Promise<Folder> {
+    const folder = await this.getTrashedFolder(id);
+    let targetParentId = folder.deletedOriginalParentId ?? ROOT_FOLDER_ID;
+    const targetParentExists = await this.folderRepo.exist({
+      where: { id: targetParentId, deletedAt: IsNull() },
+    });
+    if (!targetParentExists) {
+      targetParentId = ROOT_FOLDER_ID;
+    }
+    folder.parentId = targetParentId;
+    folder.name = await this.allocateFolderSuffixName(
+      targetParentId,
+      folder.deletedOriginalName ?? folder.name,
+    );
+    folder.deletedAt = null;
+    folder.deletedOriginalParentId = null;
+    folder.deletedOriginalName = null;
+    return this.folderRepo.save(folder);
+  }
+
+  async permanentlyDeleteFolder(id: string): Promise<void> {
+    const folder = await this.getTrashedFolder(id);
+    await this.hardDeleteFolderBranch(folder.id);
+  }
+
+  async emptyTrash(): Promise<void> {
+    const files = await this.fileRepo.find({ where: { deletedAt: Not(IsNull()) } });
+    for (const file of files) {
+      await this.removeFileFromDbAndTelegram(file);
+    }
+    const folders = await this.folderRepo.find({ where: { deletedAt: Not(IsNull()) } });
+    for (const folder of folders) {
+      await this.hardDeleteFolderBranch(folder.id);
+    }
   }
 
   async deleteFolder(folderId: string): Promise<void> {
@@ -446,25 +860,13 @@ export class StorageService implements OnModuleInit {
         StorageExceptionMessage.ROOT_FOLDER_DELETE_FORBIDDEN,
       );
     }
-    await this.ensureFolder(folderId);
-
-    const children = await this.folderRepo.find({
-      where: { parentId: folderId },
-      order: { name: TYPEORM_ORDER_ASC },
-    });
-    for (const child of children) {
-      await this.deleteFolder(child.id);
-    }
-
-    const files = await this.fileRepo.find({
-      where: { folderId },
-      order: { name: TYPEORM_ORDER_ASC },
-    });
-    for (const f of files) {
-      await this.removeFileFromDbAndTelegram(f);
-    }
-
-    await this.folderRepo.delete({ id: folderId });
+    const folder = await this.ensureFolder(folderId);
+    folder.deletedAt = new Date();
+    folder.deletedOriginalParentId = folder.parentId;
+    folder.deletedOriginalName = folder.name;
+    folder.parentId = ROOT_FOLDER_ID;
+    folder.name = this.buildTrashFolderName(folder);
+    await this.folderRepo.save(folder);
   }
 
   private async removeFileFromDbAndTelegram(f: StoredFile): Promise<void> {
@@ -477,15 +879,76 @@ export class StorageService implements OnModuleInit {
         await this.telegram.deleteChatMessage(msgId);
       }
     }
+    const objectKey = f.s3ObjectKey;
+    if (objectKey) {
+      const cnt = await this.fileRepo.count({
+        where: { s3ObjectKey: objectKey },
+      });
+      if (cnt <= 1) {
+        await this.minio.deleteObject(objectKey);
+      }
+    }
     await this.fileRepo.remove(f);
   }
 
   async getFile(id: string): Promise<StoredFile> {
-    const file = await this.fileRepo.findOne({ where: { id } });
+    const file = await this.fileRepo.findOne({
+      where: { id, deletedAt: IsNull() },
+      relations: { tags: true },
+    });
     if (!file) {
       throw new NotFoundException(StorageExceptionMessage.FILE_NOT_FOUND);
     }
     return file;
+  }
+
+  private async getTrashedFile(id: string): Promise<StoredFile> {
+    const file = await this.fileRepo.findOne({
+      where: { id, deletedAt: Not(IsNull()) },
+      relations: { tags: true },
+    });
+    if (!file) {
+      throw new NotFoundException(StorageExceptionMessage.FILE_NOT_FOUND);
+    }
+    return file;
+  }
+
+  private async getTrashedFolder(id: string): Promise<Folder> {
+    const folder = await this.folderRepo.findOne({
+      where: { id, deletedAt: Not(IsNull()) },
+    });
+    if (!folder) {
+      throw new NotFoundException(StorageExceptionMessage.FOLDER_NOT_FOUND);
+    }
+    return folder;
+  }
+
+  private buildTrashFileName(file: StoredFile): string {
+    const suffix = `.trash-${Date.now()}-${file.id.slice(0, 8)}-`;
+    return `${suffix}${file.name}`.slice(0, 255);
+  }
+
+  private buildTrashFolderName(folder: Folder): string {
+    const suffix = `.trash-${Date.now()}-${folder.id.slice(0, 8)}-`;
+    return `${suffix}${folder.name}`.slice(0, 255);
+  }
+
+  private async hardDeleteFolderBranch(folderId: string): Promise<void> {
+    const children = await this.folderRepo.find({
+      where: { parentId: folderId },
+      order: { name: TYPEORM_ORDER_ASC },
+    });
+    for (const child of children) {
+      await this.hardDeleteFolderBranch(child.id);
+    }
+    const files = await this.fileRepo.find({
+      where: { folderId },
+      order: { name: TYPEORM_ORDER_ASC },
+    });
+    for (const file of files) {
+      await this.removeFileFromDbAndTelegram(file);
+    }
+    await this.folderRepo.delete({ id: folderId });
   }
 
   /** Stream file gốc từ Telegram ra Express response (download / view / link chia sẻ). */
@@ -495,14 +958,47 @@ export class StorageService implements OnModuleInit {
     disposition: (typeof ContentDispositionMode)[keyof typeof ContentDispositionMode],
   ): Promise<void> {
     const f = await this.getFile(storedFileId);
-    const url = await this.getDownloadUrl(f.telegramFileId);
-    const r = await fetch(url);
-    if (!r.ok || !r.body) {
-      throw new BadGatewayException(
-        ApiExceptionMessage.TELEGRAM_FILE_DOWNLOAD_FAILED,
-      );
+    if (f.s3ObjectKey) {
+      try {
+        const object = await this.minio.getObject(f.s3ObjectKey);
+        res.setHeader(HttpHeader.CONTENT_TYPE, object.contentType || f.mimeType);
+        res.setHeader('Content-Length', String(object.contentLength ?? f.size));
+        if (disposition === ContentDispositionMode.INLINE) {
+          res.setHeader(HttpHeader.CACHE_CONTROL, CacheControlValue.PRIVATE_MONTH);
+        }
+        res.setHeader(
+          HttpHeader.CONTENT_DISPOSITION,
+          contentDispositionHeader(disposition, f.name),
+        );
+        object.body.pipe(res);
+        return;
+      } catch (err) {
+        if (!f.telegramFileId) {
+          throw err;
+        }
+      }
+    }
+    if (!f.telegramFileId) {
+      throw new BadGatewayException('File không có bản Telegram để tải dự phòng');
+    }
+    let r: globalThis.Response;
+    try {
+      r = await this.fetchTelegramFileResponse(f.telegramFileId);
+    } catch (err) {
+      if (StorageService.isTelegramFileTooBigError(err)) {
+        const url = StorageService.telegramMessageUrl(f.telegramMessageId);
+        if (url) {
+          res.redirect(url);
+          return;
+        }
+      }
+      throw err;
     }
     res.setHeader(HttpHeader.CONTENT_TYPE, f.mimeType);
+    res.setHeader('Content-Length', String(f.size));
+    if (disposition === ContentDispositionMode.INLINE) {
+      res.setHeader(HttpHeader.CACHE_CONTROL, CacheControlValue.PRIVATE_MONTH);
+    }
     res.setHeader(
       HttpHeader.CONTENT_DISPOSITION,
       contentDispositionHeader(disposition, f.name),
@@ -514,9 +1010,30 @@ export class StorageService implements OnModuleInit {
     return this.telegram.getFileDownloadUrl(fileId);
   }
 
+  async fetchTelegramFileResponse(fileId: string): Promise<globalThis.Response> {
+    let lastError: unknown;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const url = await this.getDownloadUrl(fileId);
+        const response = await StorageService.fetchTelegramUrl(url);
+        if (response.ok && response.body) {
+          return response;
+        }
+        lastError = new Error(`Telegram file response ${response.status}`);
+      } catch (err) {
+        lastError = err;
+      }
+      await StorageService.sleep(250 * (attempt + 1));
+    }
+    throw new BadGatewayException({
+      message: ApiExceptionMessage.TELEGRAM_FILE_DOWNLOAD_FAILED,
+      detail: StorageService.errorDetail(lastError),
+    });
+  }
+
   /** Chuẩn bị danh sách entry ZIP + tên file — dùng sync stream và worker folder-zip. */
   async prepareFolderZipArchive(folderIdParam: string): Promise<{
-    entries: Array<{ zipPath: string; telegramFileId: string }>;
+    entries: Array<{ zipPath: string; telegramFileId: string | null; s3ObjectKey: string | null }>;
     zipBaseName: string;
   }> {
     const folderId = this.resolveFolderId(folderIdParam);
@@ -538,28 +1055,26 @@ export class StorageService implements OnModuleInit {
 
   /** Ghi ZIP ra đĩa (worker queue). */
   async writeFolderZipToDisk(
-    entries: Array<{ zipPath: string; telegramFileId: string }>,
+    entries: Array<{ zipPath: string; telegramFileId: string | null; s3ObjectKey: string | null }>,
     zipBaseName: string,
     absoluteZipPath: string,
   ): Promise<void> {
     await mkdir(dirname(absoluteZipPath), { recursive: true });
     const output = createWriteStream(absoluteZipPath);
-    const archive = archiver('zip', { zlib: { level: 6 } });
+    const archive = createZipArchive();
     archive.pipe(output);
 
     try {
       for (const e of entries) {
-        const url = await this.getDownloadUrl(e.telegramFileId);
-        const r = await fetch(url);
-        if (!r.ok || !r.body) {
-          archive.abort();
-          throw new BadGatewayException(
-            ApiExceptionMessage.TELEGRAM_FILE_DOWNLOAD_FAILED,
-          );
+        if (e.s3ObjectKey) {
+          const object = await this.minio.getObject(e.s3ObjectKey);
+          archive.append(object.body, { name: e.zipPath });
+        } else if (e.telegramFileId) {
+          const r = await this.fetchTelegramFileResponse(e.telegramFileId);
+          archive.append(Readable.fromWeb(r.body as import('stream/web').ReadableStream), {
+            name: e.zipPath,
+          });
         }
-        archive.append(Readable.fromWeb(r.body as import('stream/web').ReadableStream), {
-          name: e.zipPath,
-        });
       }
       await archive.finalize();
       await finished(output);
@@ -605,7 +1120,7 @@ export class StorageService implements OnModuleInit {
       contentDispositionHeader(ContentDispositionMode.ATTACHMENT, `${zipBaseName}.zip`),
     );
 
-    const archive = archiver('zip', { zlib: { level: 6 } });
+    const archive = createZipArchive();
 
     await new Promise<void>((resolve, reject) => {
       archive.once('error', reject);
@@ -613,20 +1128,15 @@ export class StorageService implements OnModuleInit {
       void (async () => {
         try {
           for (const e of entries) {
-            const url = await this.getDownloadUrl(e.telegramFileId);
-            const r = await fetch(url);
-            if (!r.ok || !r.body) {
-              archive.abort();
-              reject(
-                new BadGatewayException(
-                  ApiExceptionMessage.TELEGRAM_FILE_DOWNLOAD_FAILED,
-                ),
-              );
-              return;
+            if (e.s3ObjectKey) {
+              const object = await this.minio.getObject(e.s3ObjectKey);
+              archive.append(object.body, { name: e.zipPath });
+            } else if (e.telegramFileId) {
+              const r = await this.fetchTelegramFileResponse(e.telegramFileId);
+              archive.append(Readable.fromWeb(r.body as import('stream/web').ReadableStream), {
+                name: e.zipPath,
+              });
             }
-            archive.append(Readable.fromWeb(r.body as import('stream/web').ReadableStream), {
-              name: e.zipPath,
-            });
           }
           await archive.finalize();
           resolve();
@@ -673,7 +1183,8 @@ export class StorageService implements OnModuleInit {
       const { srcId, dstId } = pair;
 
       const files = await this.fileRepo.find({
-        where: { folderId: srcId },
+        where: { folderId: srcId, deletedAt: IsNull() },
+        relations: { tags: true },
         order: { name: TYPEORM_ORDER_ASC },
       });
       for (const f of files) {
@@ -685,8 +1196,12 @@ export class StorageService implements OnModuleInit {
             size: f.size,
             telegramFileId: f.telegramFileId,
             telegramFileUniqueId: f.telegramFileUniqueId,
+            contentSha256: f.contentSha256,
+            s3Bucket: f.s3Bucket,
+            s3ObjectKey: f.s3ObjectKey,
             thumbnailTelegramFileId: f.thumbnailTelegramFileId,
             telegramMessageId: f.telegramMessageId,
+            tags: f.tags,
           }),
         );
       }
@@ -712,26 +1227,97 @@ export class StorageService implements OnModuleInit {
     return rootCopy;
   }
 
+  async moveFolder(folderId: string, targetParentIdParam: string): Promise<Folder> {
+    if (folderId === ROOT_FOLDER_ID) {
+      throw new BadRequestException(StorageExceptionMessage.ROOT_FOLDER_DELETE_FORBIDDEN);
+    }
+    const folder = await this.ensureFolder(folderId);
+    const targetParentId = this.resolveFolderId(targetParentIdParam);
+    if (targetParentId === folder.parentId) {
+      return folder;
+    }
+    await this.ensureFolder(targetParentId);
+    await this.assertTargetParentOutsideSourceSubtree(folderId, targetParentId);
+
+    const sibling = await this.folderRepo.findOne({
+      where: { parentId: targetParentId, name: folder.name },
+    });
+    if (sibling && sibling.id !== folder.id) {
+      throw new ConflictException(StorageExceptionMessage.FOLDER_DUPLICATE_NAME);
+    }
+
+    folder.parentId = targetParentId;
+    return this.folderRepo.save(folder);
+  }
+
   async findDuplicateFileGroups(): Promise<
-    Array<{ telegramFileUniqueId: string; files: StoredFile[] }>
+    Array<{ telegramFileUniqueId: string | null; contentSha256: string | null; files: StoredFile[] }>
   > {
-    const rows = await this.fileRepo
+    const hashRows = await this.fileRepo
+      .createQueryBuilder('f')
+      .select('f.contentSha256', 'contentSha256')
+      .addSelect('COUNT(*)', 'cnt')
+      .where('f.deletedAt IS NULL')
+      .andWhere('f.contentSha256 IS NOT NULL')
+      .groupBy('f.contentSha256')
+      .having('COUNT(*) > :n', { n: 1 })
+      .getRawMany<{ contentSha256: string }>();
+
+    const telegramRows = await this.fileRepo
       .createQueryBuilder('f')
       .select('f.telegramFileUniqueId', 'telegramFileUniqueId')
       .addSelect('COUNT(*)', 'cnt')
+      .where('f.deletedAt IS NULL')
+      .andWhere('f.contentSha256 IS NULL')
+      .andWhere('f.telegramFileUniqueId IS NOT NULL')
       .groupBy('f.telegramFileUniqueId')
       .having('COUNT(*) > :n', { n: 1 })
       .getRawMany<{ telegramFileUniqueId: string }>();
 
-    const groups: Array<{ telegramFileUniqueId: string; files: StoredFile[] }> = [];
-    for (const r of rows) {
+    const groups: Array<{
+      telegramFileUniqueId: string | null;
+      contentSha256: string | null;
+      files: StoredFile[];
+    }> = [];
+    for (const r of hashRows) {
       const files = await this.fileRepo.find({
-        where: { telegramFileUniqueId: r.telegramFileUniqueId },
+        where: { contentSha256: r.contentSha256, deletedAt: IsNull() },
+        relations: { tags: true },
         order: { createdAt: TYPEORM_ORDER_ASC },
       });
-      groups.push({ telegramFileUniqueId: r.telegramFileUniqueId, files });
+      groups.push({ telegramFileUniqueId: files[0]?.telegramFileUniqueId ?? null, contentSha256: r.contentSha256, files });
+    }
+    for (const r of telegramRows) {
+      const files = await this.fileRepo.find({
+        where: { telegramFileUniqueId: r.telegramFileUniqueId, deletedAt: IsNull() },
+        relations: { tags: true },
+        order: { createdAt: TYPEORM_ORDER_ASC },
+      });
+      groups.push({ telegramFileUniqueId: r.telegramFileUniqueId, contentSha256: null, files });
     }
     return groups;
+  }
+
+  async deleteDuplicateFiles(): Promise<{
+    groups: number;
+    deleted: number;
+    files: StoredFile[];
+  }> {
+    const groups = await this.findDuplicateFileGroups();
+    const deletedFiles: StoredFile[] = [];
+    for (const group of groups) {
+      const [, ...duplicates] = group.files;
+      for (const duplicate of duplicates) {
+        await this.deleteFile(duplicate.id);
+        const trashed = await this.getTrashedFile(duplicate.id);
+        deletedFiles.push(trashed);
+      }
+    }
+    return {
+      groups: groups.length,
+      deleted: deletedFiles.length,
+      files: deletedFiles,
+    };
   }
 
   async getFilesMetaBatch(ids: string[]): Promise<
@@ -743,6 +1329,7 @@ export class StorageService implements OnModuleInit {
       folderId: string;
       createdAt: Date;
       hasThumbnail: boolean;
+      tags?: string[];
     }>
   > {
     if (ids.length > 100) {
@@ -752,7 +1339,10 @@ export class StorageService implements OnModuleInit {
     if (uniq.length === 0) {
       return [];
     }
-    const files = await this.fileRepo.find({ where: { id: In(uniq) } });
+    const files = await this.fileRepo.find({
+      where: { id: In(uniq), deletedAt: IsNull() },
+      relations: { tags: true },
+    });
     const map = new Map(files.map((f) => [f.id, f]));
     return uniq
       .map((id) => map.get(id))
@@ -765,6 +1355,7 @@ export class StorageService implements OnModuleInit {
         folderId: f.folderId,
         createdAt: f.createdAt instanceof Date ? f.createdAt : new Date(f.createdAt as string),
         hasThumbnail: !!f.thumbnailTelegramFileId,
+        tags: StorageService.tagsToNames(f),
       }));
   }
 
@@ -780,7 +1371,9 @@ export class StorageService implements OnModuleInit {
     thumbnailFileId: string | null;
   }): Promise<StoredFile | null> {
     const mid = String(params.messageId);
-    const existing = await this.fileRepo.findOne({ where: { telegramMessageId: mid } });
+    const existing = await this.fileRepo.findOne({
+      where: { telegramMessageId: mid, deletedAt: IsNull() },
+    });
     if (existing) {
       return null;
     }
@@ -834,7 +1427,9 @@ export class StorageService implements OnModuleInit {
   }
 
   private async uniqueInboundFileName(folderId: string, baseName: string): Promise<string> {
-    const exists = await this.fileRepo.exist({ where: { folderId, name: baseName } });
+    const exists = await this.fileRepo.exist({
+      where: { folderId, name: baseName, deletedAt: IsNull() },
+    });
     if (!exists) {
       return baseName;
     }
@@ -853,11 +1448,15 @@ export class StorageService implements OnModuleInit {
   private async collectDescendantFilesForZip(
     folderId: string,
     relativePath: string,
-  ): Promise<Array<{ zipPath: string; telegramFileId: string }>> {
-    const out: Array<{ zipPath: string; telegramFileId: string }> = [];
+  ): Promise<Array<{ zipPath: string; telegramFileId: string | null; s3ObjectKey: string | null }>> {
+    const out: Array<{
+      zipPath: string;
+      telegramFileId: string | null;
+      s3ObjectKey: string | null;
+    }> = [];
 
     const files = await this.fileRepo.find({
-      where: { folderId },
+      where: { folderId, deletedAt: IsNull() },
       order: { name: TYPEORM_ORDER_ASC },
     });
     for (const f of files) {
@@ -865,6 +1464,7 @@ export class StorageService implements OnModuleInit {
       out.push({
         zipPath: `${relativePath}${safeFile}`,
         telegramFileId: f.telegramFileId,
+        s3ObjectKey: f.s3ObjectKey,
       });
     }
 
@@ -889,10 +1489,130 @@ export class StorageService implements OnModuleInit {
     return cleaned;
   }
 
-  private static zipArchiveBasename(folder: Folder): string {
+  static normalizeTags(tags: string[]): string[] {
+    return [
+      ...new Set(
+        tags
+          .map((tag) => tag.trim().toLowerCase())
+          .filter((tag) => tag.length > 0)
+          .map((tag) => tag.slice(0, 80)),
+      ),
+    ].slice(0, 20);
+  }
+
+  static tagsToNames(file: StoredFile): string[] {
+    return (file.tags ?? []).map((tag) => tag.name).sort((a, b) => a.localeCompare(b));
+  }
+
+  private decorateFilesForClient(files: StoredFile[]): StoredFile[] {
+    return files.map((file) => {
+      Object.assign(file, {
+        tags: StorageService.tagsToNames(file),
+        canDirectDownload: !!file.s3ObjectKey || (!!file.telegramFileId && file.size <= telegramDownloadMaxBytes()),
+        telegramMessageUrl: StorageService.telegramMessageUrl(file.telegramMessageId),
+      });
+      return file;
+    });
+  }
+
+  private static sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  private static async fetchTelegramUrl(url: string): Promise<globalThis.Response> {
+    try {
+      return await fetch(url);
+    } catch {
+      return StorageService.fetchTelegramUrlWithHttps(url);
+    }
+  }
+
+  private static fetchTelegramUrlWithHttps(url: string): Promise<globalThis.Response> {
+    return new Promise((resolve, reject) => {
+      const req = httpsRequest(
+        url,
+        {
+          family: 4,
+          timeout: 30000,
+        },
+        (res) => {
+          const headers = new Headers();
+          Object.entries(res.headers).forEach(([key, value]) => {
+            if (Array.isArray(value)) {
+              headers.set(key, value.join(', '));
+              return;
+            }
+            if (value !== undefined) {
+              headers.set(key, String(value));
+            }
+          });
+          resolve(
+            new globalThis.Response(
+              Readable.toWeb(res) as ReadableStream<Uint8Array>,
+              {
+                status: res.statusCode ?? 502,
+                statusText: res.statusMessage,
+                headers,
+              },
+            ),
+          );
+        },
+      );
+      req.on('timeout', () => req.destroy(new Error('Telegram HTTPS timeout')));
+      req.on('error', reject);
+      req.end();
+    });
+  }
+
+  private static errorDetail(err: unknown): string {
+    if (!(err instanceof Error)) {
+      return String(err);
+    }
+    const cause =
+      'cause' in err && err.cause instanceof Error
+        ? ` (${err.cause.message})`
+        : '';
+    return `${err.message}${cause}`;
+  }
+
+  private static isTelegramFileTooBigError(err: unknown): boolean {
     const raw =
-      folder.id === ROOT_FOLDER_ID ? VIRTUAL_ROOT_FOLDER_NAME : folder.name;
+      err instanceof BadGatewayException
+        ? JSON.stringify(err.getResponse())
+        : err instanceof Error
+          ? err.message
+          : String(err);
+    return raw.includes('file is too big');
+  }
+
+  private static telegramMessageUrl(messageId: string | null | undefined): string | undefined {
+    if (!messageId) {
+      return undefined;
+    }
+    const chat = process.env[EnvKey.TELEGRAM_STORAGE_CHAT_ID]?.trim();
+    if (!chat) {
+      return undefined;
+    }
+    if (chat.startsWith('@')) {
+      return `https://t.me/${chat.slice(1)}/${messageId}`;
+    }
+    if (chat.startsWith('-100')) {
+      return `https://t.me/c/${chat.slice(4)}/${messageId}`;
+    }
+    return undefined;
+  }
+
+  private static zipArchiveBasename(folder: Folder): string {
+    const raw = folder.id === ROOT_FOLDER_ID ? StorageService.dateStampedDataName() : folder.name;
     const base = StorageService.sanitizeZipPathSegment(raw).replace(/\./g, '_');
     return base || 'folder';
+  }
+
+  private static dateStampedDataName(): string {
+    const now = new Date();
+    const dd = String(now.getDate()).padStart(2, '0');
+    const mm = String(now.getMonth() + 1).padStart(2, '0');
+    const yyyy = String(now.getFullYear());
+    return `data [${dd}-${mm}-${yyyy}]`;
   }
 }

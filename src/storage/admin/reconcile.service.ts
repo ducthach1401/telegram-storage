@@ -44,6 +44,11 @@ export class ReconcileService {
       }
 
       for (const file of batch) {
+        if (!file.telegramFileId) {
+          scanned++;
+          lastId = file.id;
+          continue;
+        }
         const ok = await this.telegram.isTelegramDocumentAccessible(file.telegramFileId);
         if (delayMs > 0) {
           await sleep(delayMs);

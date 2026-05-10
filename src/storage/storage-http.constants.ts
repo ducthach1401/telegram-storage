@@ -6,6 +6,8 @@ export const FileMultipart = {
 } as const;
 
 export const FileRoutePath = {
+  QUOTA: 'quota',
+  TRASH: 'trash',
   SEARCH: 'search',
   UPLOAD: 'upload',
   UPLOAD_ASYNC: 'upload/async',
@@ -35,6 +37,7 @@ export const FolderRoutePath = {
   CONTENTS_PATH: ':folderId/contents',
   /** ZIP đệ quy: mọi file trong thư mục và thư mục con */
   DOWNLOAD_ZIP_PATH: ':folderId/download',
+  DOWNLOAD_ZIP_AUTO_PATH: ':folderId/download/auto',
   DOWNLOAD_ZIP_ASYNC_PATH: ':folderId/download/async',
   DOWNLOAD_JOB_STATUS_PATH: 'download/jobs/:jobId',
   DOWNLOAD_STREAM_PATH: 'download/stream',

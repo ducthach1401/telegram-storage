@@ -1,4 +1,4 @@
-import { ApiProperty } from "@nestjs/swagger";
+import { ApiProperty, ApiPropertyOptional } from "@nestjs/swagger";
 
 /** Metadata file (GET /files/:id) */
 export class FileMetaResponseDto {
@@ -22,4 +22,13 @@ export class FileMetaResponseDto {
 
   @ApiProperty({ description: "Có thumbnail JPEG hay không" })
   hasThumbnail: boolean;
+
+  @ApiPropertyOptional({ type: [String], description: "Tag/label gắn với file" })
+  tags?: string[];
+
+  @ApiPropertyOptional({ description: "Có thể tải/xem trực tiếp qua Bot API hay không" })
+  canDirectDownload?: boolean;
+
+  @ApiPropertyOptional({ description: "Link message Telegram để mở file trong channel khi file quá lớn" })
+  telegramMessageUrl?: string;
 }

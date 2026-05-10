@@ -21,6 +21,7 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { FileInterceptor } from '@nestjs/platform-express';
+import { unlink } from 'fs/promises';
 import {
   ApiAcceptedResponse,
   ApiBadGatewayResponse,
@@ -57,15 +58,22 @@ import {
   HttpHeader,
   MimeType,
 } from '../../common/http.constants';
-import { UploadDefaults } from '../../common/upload.defaults';
+import {
+  telegramDownloadMaxBytes,
+  UploadDefaults,
+} from '../../common/upload.defaults';
 import {
   FileMetaBatchRequestDto,
   FileMetaBatchResponseDto,
 } from '../domain/dto/file-meta-batch.dto';
 import { FileMetaResponseDto } from '../domain/dto/file-meta-response.dto';
+import { FileTagsResponseDto, UpdateFileTagsDto } from '../domain/dto/file-tags.dto';
 import { StoredFileSummaryDto } from '../domain/dto/stored-file-summary.dto';
+import { StorageQuotaResponseDto } from '../domain/dto/storage-quota-response.dto';
+import { TrashedFileDto, TrashedFolderDto, TrashListResponseDto } from '../domain/dto/trash-response.dto';
 import { UploadJobQueuedDto } from '../domain/dto/upload-job-queued.dto';
 import { UploadJobStatusDto } from '../domain/dto/upload-job-status.dto';
+import { Folder } from '../domain/entities/folder.entity';
 import { StoredFile } from '../domain/entities/stored-file.entity';
 import { asyncUploadDiskStorage } from '../multer-async-disk.storage';
 import {
@@ -94,6 +102,87 @@ export class FileController {
     private readonly shareDownloadToken: ShareDownloadTokenService,
     @InjectQueue(FILE_UPLOAD_QUEUE) private readonly uploadQueue: Queue<FileUploadJobData>,
   ) {}
+
+  @Get(FileRoutePath.QUOTA)
+  @ApiOperation({
+    summary: 'Quota / thống kê dung lượng',
+    description: 'Thống kê file active, file trong thùng rác và dung lượng theo MIME type.',
+  })
+  @ApiOkResponse({ type: StorageQuotaResponseDto })
+  async quota(): Promise<StorageQuotaResponseDto> {
+    return this.storage.getStorageQuotaStats();
+  }
+
+  @Get(FileRoutePath.TRASH)
+  @ApiOperation({ summary: 'Danh sách file và folder trong thùng rác' })
+  @ApiQuery({ name: 'limit', required: false, schema: { minimum: 1, maximum: 200 } })
+  @ApiOkResponse({ type: TrashListResponseDto })
+  async trash(@Query('limit') limit?: string): Promise<TrashListResponseDto> {
+    const trashLimit = limit ? Number(limit) : 100;
+    const [folders, items] = await Promise.all([
+      this.storage.listTrashedFolders(trashLimit),
+      this.storage.listTrashedFiles(trashLimit),
+    ]);
+    return {
+      folders: folders.map((f) => FileController.toTrashedFolder(f)),
+      items: items.map((f) => FileController.toTrashedFile(f)),
+    };
+  }
+
+  @Delete(FileRoutePath.TRASH)
+  @HttpCode(HttpStatus.NO_CONTENT)
+  @ApiOperation({ summary: 'Xóa sạch thùng rác' })
+  @ApiNoContentResponse()
+  async emptyTrash() {
+    await this.storage.emptyTrash();
+  }
+
+  @Post(`${FileRoutePath.TRASH}/folders/:id/restore`)
+  @ApiOperation({ summary: 'Khôi phục folder từ thùng rác' })
+  @ApiParam({ name: 'id', format: 'uuid' })
+  @ApiOkResponse({ type: TrashedFolderDto })
+  async restoreFolderFromTrash(@Param('id', ParseUUIDPipe) id: string): Promise<TrashedFolderDto> {
+    const restored = await this.storage.restoreFolder(id);
+    return FileController.toTrashedFolder(restored);
+  }
+
+  @Delete(`${FileRoutePath.TRASH}/folders/:id`)
+  @HttpCode(HttpStatus.NO_CONTENT)
+  @ApiOperation({ summary: 'Xóa vĩnh viễn folder trong thùng rác' })
+  @ApiParam({ name: 'id', format: 'uuid' })
+  @ApiNoContentResponse()
+  async permanentlyRemoveFolderFromTrash(@Param('id', ParseUUIDPipe) id: string) {
+    await this.storage.permanentlyDeleteFolder(id);
+  }
+
+  @Post(`${FileRoutePath.TRASH}/:id/restore`)
+  @ApiOperation({
+    summary: 'Khôi phục file từ thùng rác',
+    description: 'Mặc định reject nếu tên cũ đang bị trùng; hỗ trợ duplicatePolicy/overwrite.',
+  })
+  @ApiParam({ name: 'id', format: 'uuid' })
+  @ApiQuery({ name: 'duplicatePolicy', required: false, enum: ['reject', 'overwrite', 'suffix'] })
+  @ApiQuery({ name: 'overwrite', required: false })
+  @ApiOkResponse({ type: StoredFileSummaryDto })
+  @ApiNotFoundResponse({ description: 'Không tìm thấy file trong thùng rác' })
+  async restoreFromTrash(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Query() dup: DuplicatePolicyQueryDto,
+  ): Promise<StoredFileSummaryDto> {
+    const policy = parseDuplicateNamePolicy(dup.duplicatePolicy, dup.overwrite);
+    const restored = await this.storage.restoreFile(id, policy);
+    return FileController.toSummary(restored);
+  }
+
+  @Delete(`${FileRoutePath.TRASH}/:id`)
+  @HttpCode(HttpStatus.NO_CONTENT)
+  @ApiOperation({ summary: 'Xóa vĩnh viễn file trong thùng rác' })
+  @ApiParam({ name: 'id', format: 'uuid' })
+  @ApiNoContentResponse()
+  @ApiNotFoundResponse({ description: 'Không tìm thấy file trong thùng rác' })
+  async permanentlyRemoveFromTrash(@Param('id', ParseUUIDPipe) id: string) {
+    await this.storage.permanentlyDeleteFile(id);
+  }
 
   @Post(FileRoutePath.UPLOAD)
   @ApiOperation({ summary: 'Upload file (multipart)' })
@@ -124,23 +213,46 @@ export class FileController {
   @ApiConflictResponse({ description: 'Trùng tên khi duplicatePolicy=reject' })
   @ApiQuery({ name: 'duplicatePolicy', required: false, enum: ['reject', 'overwrite', 'suffix'] })
   @ApiQuery({ name: 'overwrite', required: false, description: 'true = như duplicatePolicy=overwrite' })
-  @UseInterceptors(FileInterceptor(FileMultipart.FIELD_FILE))
+  @UseInterceptors(
+    FileInterceptor(FileMultipart.FIELD_FILE, {
+      storage: asyncUploadDiskStorage,
+      limits: {
+        fileSize:
+          Number(
+            process.env[EnvKey.MINIO_LIMIT_GB] ??
+              String(UploadDefaults.MINIO_LIMIT_GB_FALLBACK),
+          ) *
+          1024 *
+          1024 *
+          1024,
+      },
+    }),
+  )
   async upload(
     @UploadedFile() file: Express.Multer.File | undefined,
     @Query() dup: DuplicatePolicyQueryDto,
     @Body(FileMultipart.BODY_FOLDER_ID) folderId?: string,
   ) {
-    if (!file?.buffer) {
+    if (!file?.path) {
       throw new BadRequestException(ApiExceptionMessage.MISSING_MULTIPART_FILE);
     }
     const policy = parseDuplicateNamePolicy(dup.duplicatePolicy, dup.overwrite);
-    return this.storage.saveUploadedFile(
-      folderId,
-      file.originalname,
-      file.mimetype,
-      file.buffer,
-      policy,
-    );
+    try {
+      const { folderId: targetFolderId, effectiveName } = await this.storage.resolveUploadTarget(
+        folderId,
+        file.originalname,
+        policy,
+      );
+      return await this.storage.persistUploadedDocumentFromPath(
+        targetFolderId,
+        effectiveName,
+        file.mimetype,
+        file.path,
+        file.size,
+      );
+    } finally {
+      await unlink(file.path).catch(() => undefined);
+    }
   }
 
   @Post(FileRoutePath.UPLOAD_ASYNC)
@@ -178,9 +290,10 @@ export class FileController {
       limits: {
         fileSize:
           Number(
-            process.env[EnvKey.MAX_UPLOAD_MB] ??
-              String(UploadDefaults.MAX_UPLOAD_MB_FALLBACK),
+            process.env[EnvKey.MINIO_LIMIT_GB] ??
+              String(UploadDefaults.MINIO_LIMIT_GB_FALLBACK),
           ) *
+          1024 *
           1024 *
           1024,
       },
@@ -260,6 +373,14 @@ export class FileController {
       folderId: query.folderId,
       mode: query.mode ?? 'substring',
       limit: query.limit ?? 50,
+      mimeType: query.mimeType,
+      mimePrefix: query.mimePrefix,
+      minSize: query.minSize,
+      maxSize: query.maxSize,
+      createdFrom: query.createdFrom,
+      createdTo: query.createdTo,
+      hasThumbnail: query.hasThumbnail,
+      tags: query.tags,
     });
     return {
       items: items.map((f) => FileController.toSummary(f)),
@@ -317,6 +438,33 @@ export class FileController {
       policy,
     );
     return FileController.toSummary(saved);
+  }
+
+  @Get(':id/tags')
+  @ApiOperation({ summary: 'Danh sách tag của file' })
+  @ApiParam({ name: 'id', format: 'uuid' })
+  @ApiOkResponse({ type: FileTagsResponseDto })
+  async getTags(@Param('id', ParseUUIDPipe) id: string): Promise<FileTagsResponseDto> {
+    return {
+      fileId: id,
+      tags: await this.storage.getFileTags(id),
+    };
+  }
+
+  @Patch(':id/tags')
+  @ApiOperation({ summary: 'Gắn/thay thế tag cho file' })
+  @ApiParam({ name: 'id', format: 'uuid' })
+  @ApiBody({ type: UpdateFileTagsDto })
+  @ApiOkResponse({ type: FileTagsResponseDto })
+  async updateTags(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body(ValidationPipe) body: UpdateFileTagsDto,
+  ): Promise<FileTagsResponseDto> {
+    const saved = await this.storage.setFileTags(id, body.tags);
+    return {
+      fileId: saved.id,
+      tags: StorageService.tagsToNames(saved),
+    };
   }
 
   @Post(`:id/${FileRoutePathSegment.SHARE_DOWNLOAD}`)
@@ -390,6 +538,9 @@ export class FileController {
       folderId: f.folderId,
       createdAt: f.createdAt,
       hasThumbnail: !!f.thumbnailTelegramFileId,
+      tags: StorageService.tagsToNames(f),
+      canDirectDownload: FileController.canDirectDownload(f),
+      telegramMessageUrl: FileController.telegramMessageUrl(f.telegramMessageId),
     };
   }
 
@@ -441,15 +592,11 @@ export class FileController {
     if (!thumbId) {
       throw new NotFoundException(ApiExceptionMessage.FILE_NO_THUMBNAIL);
     }
-    const url = await this.storage.getDownloadUrl(thumbId);
-    const r = await fetch(url);
-    if (!r.ok || !r.body) {
-      throw new BadGatewayException(
-        ApiExceptionMessage.TELEGRAM_THUMB_DOWNLOAD_FAILED,
-      );
-    }
+    const r = await this.storage.fetchTelegramFileResponse(thumbId).catch(() => {
+      throw new BadGatewayException(ApiExceptionMessage.TELEGRAM_THUMB_DOWNLOAD_FAILED);
+    });
     res.setHeader(HttpHeader.CONTENT_TYPE, MimeType.JPEG);
-    res.setHeader(HttpHeader.CACHE_CONTROL, CacheControlValue.PUBLIC_DAY);
+    res.setHeader(HttpHeader.CACHE_CONTROL, CacheControlValue.PRIVATE_MONTH);
     Readable.fromWeb(r.body as import('stream/web').ReadableStream).pipe(res);
   }
 
@@ -462,9 +609,60 @@ export class FileController {
       size: f.size,
       telegramFileId: f.telegramFileId,
       telegramFileUniqueId: f.telegramFileUniqueId,
+      contentSha256: f.contentSha256,
+      s3Bucket: f.s3Bucket,
+      s3ObjectKey: f.s3ObjectKey,
       thumbnailTelegramFileId: f.thumbnailTelegramFileId,
       telegramMessageId: f.telegramMessageId,
+      tags: StorageService.tagsToNames(f),
+      canDirectDownload: FileController.canDirectDownload(f),
+      telegramMessageUrl: FileController.telegramMessageUrl(f.telegramMessageId),
       createdAt: f.createdAt instanceof Date ? f.createdAt : new Date(f.createdAt as string),
     };
+  }
+
+  private static toTrashedFile(f: StoredFile): TrashedFileDto {
+    const deletedAt = f.deletedAt instanceof Date ? f.deletedAt : new Date(f.deletedAt ?? Date.now());
+    return {
+      ...FileController.toSummary(f),
+      deletedAt,
+      deletedOriginalFolderId: f.deletedOriginalFolderId,
+      deletedOriginalName: f.deletedOriginalName,
+    };
+  }
+
+  private static toTrashedFolder(folder: Folder): TrashedFolderDto {
+    const deletedAt =
+      folder.deletedAt instanceof Date ? folder.deletedAt : new Date(folder.deletedAt ?? Date.now());
+    return {
+      id: folder.id,
+      parentId: folder.parentId,
+      name: folder.deletedOriginalName ?? folder.name,
+      createdAt: folder.createdAt instanceof Date ? folder.createdAt : new Date(folder.createdAt),
+      deletedAt,
+      deletedOriginalParentId: folder.deletedOriginalParentId,
+      deletedOriginalName: folder.deletedOriginalName,
+    };
+  }
+
+  private static canDirectDownload(f: StoredFile): boolean {
+    return !!f.s3ObjectKey || (!!f.telegramFileId && f.size <= telegramDownloadMaxBytes());
+  }
+
+  private static telegramMessageUrl(messageId: string | null | undefined): string | undefined {
+    if (!messageId) {
+      return undefined;
+    }
+    const chat = process.env[EnvKey.TELEGRAM_STORAGE_CHAT_ID]?.trim();
+    if (!chat) {
+      return undefined;
+    }
+    if (chat.startsWith('@')) {
+      return `https://t.me/${chat.slice(1)}/${messageId}`;
+    }
+    if (chat.startsWith('-100')) {
+      return `https://t.me/c/${chat.slice(4)}/${messageId}`;
+    }
+    return undefined;
   }
 }

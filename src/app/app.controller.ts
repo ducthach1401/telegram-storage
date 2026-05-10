@@ -1,5 +1,5 @@
 import { Controller, Get, Header } from "@nestjs/common";
-import { ApiOperation, ApiProduces, ApiTags } from "@nestjs/swagger";
+import { ApiOkResponse, ApiOperation, ApiProduces, ApiTags } from "@nestjs/swagger";
 import { API_V1_PREFIX } from "../common/api-route";
 import { HttpHeader, MimeType } from "../common/http.constants";
 import { AppService } from "./app.service";
@@ -15,5 +15,27 @@ export class AppController {
   @Header(HttpHeader.CONTENT_TYPE, MimeType.TEXT_PLAIN_UTF8)
   getServiceName(): string {
     return this.app.getServiceName();
+  }
+
+  @Get("auth/verify")
+  @ApiOperation({ summary: "Verify Basic Auth hiện tại" })
+  @ApiOkResponse({
+    schema: {
+      type: "object",
+      properties: {
+        ok: { type: "boolean", example: true },
+        service: { type: "string", example: "telegram-storage" },
+        maxUploadBytes: { type: "number", example: 53687091200 },
+        minioLimitBytes: { type: "number", example: 53687091200 },
+      },
+    },
+  })
+  verifyAuth(): { ok: true; service: string; maxUploadBytes: number; minioLimitBytes: number } {
+    return {
+      ok: true,
+      service: this.app.getServiceName(),
+      maxUploadBytes: this.app.getMaxUploadBytes(),
+      minioLimitBytes: this.app.getMinioLimitBytes(),
+    };
   }
 }

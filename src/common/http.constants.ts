@@ -28,6 +28,7 @@ export const MimeType = {
 
 export const CacheControlValue = {
   PUBLIC_DAY: 'public, max-age=86400',
+  PRIVATE_MONTH: 'private, max-age=2592000, immutable',
 } as const;
 
 export const ContentDispositionMode = {

@@ -11,6 +11,7 @@ import {
   NotFoundException,
   Param,
   ParseUUIDPipe,
+  Patch,
   Post,
   Query,
   Res,
@@ -45,8 +46,10 @@ import { CreateFolderDto } from '../domain/dto/create-folder.dto';
 import { FolderContentsQueryDto } from '../domain/dto/folder-contents-query.dto';
 import { FolderContentsResponseDto } from '../domain/dto/folder-contents-response.dto';
 import { FolderResponseDto } from '../domain/dto/folder-response.dto';
+import { FolderZipAutoResponseDto } from '../domain/dto/folder-zip-auto-response.dto';
 import { FolderZipJobQueuedDto } from '../domain/dto/folder-zip-job-queued.dto';
 import { FolderZipJobStatusDto } from '../domain/dto/folder-zip-job-status.dto';
+import { PatchFolderDto } from '../domain/dto/patch-folder.dto';
 import {
   FOLDER_ZIP_JOB_NAME,
   FOLDER_ZIP_QUEUE,
@@ -60,6 +63,8 @@ import {
   SharedFilesRoutePath,
 } from '../storage-http.constants';
 import { StorageService } from '../storage.service';
+
+const FOLDER_ZIP_DIRECT_MAX_FILES = 30;
 
 @ApiTags('folders')
 @Controller(`${API_V1_PREFIX}/folders`)
@@ -241,6 +246,48 @@ export class FolderController {
     return { jobId: String(job.id) };
   }
 
+  @Post(FolderRoutePath.DOWNLOAD_ZIP_AUTO_PATH)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Tải ZIP thư mục: server tự chọn direct hoặc queue',
+    description:
+      `Nếu thư mục có <= ${FOLDER_ZIP_DIRECT_MAX_FILES} file thì trả downloadPath tải trực tiếp; lớn hơn thì tạo job ZIP nền.`,
+  })
+  @ApiParam({
+    name: FolderRoutePath.PARAM_FOLDER_ID,
+    description: 'UUID thư mục; root không nên dùng cho tải ZIP tự động',
+  })
+  @ApiOkResponse({ type: FolderZipAutoResponseDto })
+  @ApiBadRequestResponse({ description: 'folderId không hợp lệ' })
+  async autoFolderZip(
+    @Param(FolderRoutePath.PARAM_FOLDER_ID) folderId: string,
+  ): Promise<FolderZipAutoResponseDto> {
+    if (folderId !== ROOT_FOLDER_ALIAS && !isUuid(folderId)) {
+      throw new BadRequestException(ApiExceptionMessage.FOLDER_ID_INVALID);
+    }
+    const archive = await this.storage.prepareFolderZipArchive(folderId);
+    if (archive.entries.length <= FOLDER_ZIP_DIRECT_MAX_FILES) {
+      return {
+        mode: 'direct',
+        fileCount: archive.entries.length,
+        zipBaseName: archive.zipBaseName,
+        downloadPath: `/${API_V1_PREFIX}/folders/${encodeURIComponent(folderId)}/download`,
+      };
+    }
+    const job = await this.folderZipQueue.add(FOLDER_ZIP_JOB_NAME, {
+      folderIdParam: folderId,
+    });
+    if (job.id === undefined) {
+      throw new BadGatewayException(ApiExceptionMessage.QUEUE_JOB_CREATE_FAILED);
+    }
+    return {
+      mode: 'queue',
+      fileCount: archive.entries.length,
+      zipBaseName: archive.zipBaseName,
+      jobId: String(job.id),
+    };
+  }
+
   /** `folderId` = `root` hoặc UUID */
   @Get(FolderRoutePath.CONTENTS_PATH)
   @ApiOperation({ summary: 'Liệt kê thư mục con và file trong thư mục' })
@@ -301,6 +348,33 @@ export class FolderController {
       folderLimit: query.folderLimit,
       folderCursor: query.folderCursor,
     });
+  }
+
+  @Patch(FolderRoutePath.SINGLE_FOLDER)
+  @ApiOperation({ summary: 'Di chuyển thư mục sang thư mục cha khác' })
+  @ApiParam({ name: FolderRoutePath.PARAM_FOLDER_ID, format: 'uuid' })
+  @ApiOkResponse({ type: FolderResponseDto })
+  @ApiBadRequestResponse({ description: 'parentId không hợp lệ hoặc đích nằm trong nguồn' })
+  @ApiConflictResponse({ description: 'Trùng tên thư mục ở đích' })
+  @ApiNotFoundResponse({ description: 'Không tìm thấy thư mục' })
+  async patchFolder(
+    @Param(FolderRoutePath.PARAM_FOLDER_ID, ParseUUIDPipe) folderId: string,
+    @Body(ValidationPipe) body: PatchFolderDto,
+  ): Promise<FolderResponseDto> {
+    if (!body.parentId) {
+      throw new BadRequestException(ApiExceptionMessage.PATCH_FILE_NO_CHANGE);
+    }
+    if (body.parentId !== ROOT_FOLDER_ALIAS && !isUuid(body.parentId)) {
+      throw new BadRequestException(ApiExceptionMessage.FOLDER_ID_INVALID);
+    }
+    const folder = await this.storage.moveFolder(folderId, body.parentId);
+    return {
+      id: folder.id,
+      parentId: folder.parentId,
+      name: folder.name,
+      createdAt:
+        folder.createdAt instanceof Date ? folder.createdAt : new Date(folder.createdAt as string),
+    };
   }
 
   @Delete(FolderRoutePath.SINGLE_FOLDER)

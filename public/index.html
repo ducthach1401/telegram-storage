@@ -1,0 +1,287 @@
+<!doctype html>
+<html lang="vi">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Telegram Drive</title>
+    <link rel="icon" href="/logo.png" type="image/png" />
+    <link rel="apple-touch-icon" href="/logo.png" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <img class="brand-logo" src="/logo.png" alt="Telegram Drive logo" />
+          <div>
+            <strong>Telegram Drive</strong>
+            <span data-i18n="brandSubtitle">Cloud qua Telegram</span>
+          </div>
+        </div>
+
+        <button class="primary-action" id="uploadButton">
+          <span>+</span>
+          <span data-i18n="upload">Tải lên</span>
+        </button>
+        <input id="fileInput" type="file" multiple hidden />
+        <input id="folderInput" type="file" webkitdirectory directory multiple hidden />
+
+        <nav class="nav">
+          <button class="nav-item active" data-view="drive">
+            <span>▦</span><span data-i18n="drive">Drive</span>
+          </button>
+          <button class="nav-item" data-view="trash">
+            <span>♻</span><span data-i18n="trash">Thùng rác</span>
+          </button>
+          <button class="nav-item" data-view="queue">
+            <span>↻</span><span data-i18n="queue">Queue lỗi</span>
+          </button>
+          <button class="nav-item" data-view="admin">
+            <span>⚙</span><span data-i18n="admin">Admin/API</span>
+          </button>
+        </nav>
+
+        <section class="quota-card">
+          <div class="quota-header">
+            <span data-i18n="storage">Dung lượng</span>
+          </div>
+          <div class="quota-bar"><span id="quotaBar"></span></div>
+          <p class="quota-usage" id="quotaTotal">--</p>
+          <div class="quota-header mini">
+            <span>MinIO</span>
+          </div>
+          <div class="quota-bar minio"><span id="minioQuotaBar"></span></div>
+          <p class="quota-usage" id="minioQuotaDetail">--</p>
+        </section>
+
+        <div class="sidebar-actions">
+          <button class="ghost" id="logoutButton" data-i18n="logout">Đăng xuất</button>
+          <button class="lang-toggle compact-lang" id="langToggle" title="Language">🇻🇳</button>
+        </div>
+      </aside>
+
+      <main class="main">
+        <section class="panel" id="driveView">
+          <form class="drive-search" id="searchForm">
+            <div class="drive-search-basic">
+              <div class="search-box">
+                <span>⌕</span>
+                <input id="quickSearch" name="q" type="search" data-i18n-placeholder="quickSearch" placeholder="Tìm trong drive" />
+              </div>
+              <button class="ghost search-toggle" id="searchAdvancedToggle" type="button" aria-expanded="false" title="Advanced search">⌄</button>
+              <button class="primary-action compact" type="submit" data-i18n="search">Tìm kiếm</button>
+            </div>
+            <div class="filter-grid advanced-search-fields hidden" id="advancedSearchFields">
+              <input name="mimePrefix" placeholder="image/ hoặc application/" />
+              <input name="tags" data-i18n-placeholder="tagsComma" placeholder="tag1, tag2" />
+              <input name="minSize" type="number" min="0" data-i18n-placeholder="minSize" placeholder="Size min" />
+              <input name="maxSize" type="number" min="0" data-i18n-placeholder="maxSize" placeholder="Size max" />
+              <select name="hasThumbnail">
+                <option value="" data-i18n="anyThumbnail">Thumbnail bất kỳ</option>
+                <option value="true" data-i18n="hasThumbnail">Có thumbnail</option>
+                <option value="false" data-i18n="noThumbnail">Không thumbnail</option>
+              </select>
+            </div>
+          </form>
+          <div class="panel-head">
+            <div>
+              <h2 data-i18n="myDrive">Drive của tôi</h2>
+              <div class="path-row">
+                <button class="ghost path-back" id="backFolderButton" title="Back">←</button>
+                <div class="breadcrumbs" id="breadcrumbs"></div>
+                <div class="selection-bar hidden" id="selectionBar">
+                  <span id="selectionCount">0 file đã chọn</span>
+                </div>
+              </div>
+            </div>
+            <div class="panel-actions">
+              <button class="ghost" id="viewToggleButton">Grid</button>
+              <button class="ghost" id="folderMenuButton">⋮</button>
+            </div>
+          </div>
+          <div class="search-summary hidden" id="searchSummary">
+            <span data-i18n="searchResults">Kết quả tìm kiếm</span>
+            <button class="ghost compact" id="clearSearchButton" type="button" data-i18n="clearSearch">Xóa tìm kiếm</button>
+          </div>
+          <div class="file-list hidden" id="searchResults"></div>
+          <div class="grid" id="folderGrid"></div>
+          <div class="file-list" id="fileList"></div>
+        </section>
+
+        <section class="panel hidden" id="trashView">
+          <div class="panel-head">
+            <div>
+              <h2 data-i18n="trash">Thùng rác</h2>
+              <p data-i18n="trashHint">File xóa mềm có thể khôi phục hoặc xóa vĩnh viễn.</p>
+            </div>
+            <div class="panel-actions">
+              <button class="danger ghost" id="emptyTrashButton" data-i18n="emptyTrash">Xóa toàn bộ</button>
+              <button class="ghost" id="refreshTrashButton" data-i18n="refresh">Làm mới</button>
+            </div>
+          </div>
+          <div class="grid" id="trashFolderGrid"></div>
+          <div class="file-list" id="trashList"></div>
+        </section>
+
+        <section class="panel hidden" id="queueView">
+          <div class="panel-head">
+            <div>
+              <h2 data-i18n="queue">Queue lỗi</h2>
+              <p data-i18n="queueHint">Retry các upload job đã fail nhưng còn file tạm.</p>
+            </div>
+            <button class="primary-action compact" id="retryAllButton" data-i18n="retryAll">Retry tất cả</button>
+          </div>
+          <div class="file-list" id="queueList"></div>
+        </section>
+
+        <section class="panel hidden" id="adminView">
+          <div class="panel-head">
+            <div>
+              <h2 data-i18n="admin">Admin/API</h2>
+              <p data-i18n="adminHint">Công cụ quản trị dùng các API còn lại của source.</p>
+            </div>
+          </div>
+          <div class="admin-grid">
+            <article class="admin-card">
+              <strong data-i18n="queueStats">Queue stats</strong>
+              <p data-i18n="queueStatsHint">Xem số job upload theo trạng thái.</p>
+              <button class="ghost" id="queueStatsButton" data-i18n="view">Xem</button>
+            </article>
+            <article class="admin-card">
+              <strong data-i18n="queueWorkers">Queue workers</strong>
+              <p data-i18n="queueWorkersHint">Kiểm tra worker đang kết nối Redis.</p>
+              <button class="ghost" id="queueWorkersButton" data-i18n="view">Xem</button>
+            </article>
+            <article class="admin-card">
+              <strong data-i18n="duplicates">File trùng</strong>
+              <p data-i18n="duplicatesHint">Tìm file có cùng Telegram unique id.</p>
+              <div class="panel-actions">
+                <button class="ghost" id="duplicatesButton" data-i18n="view">Xem</button>
+                <button class="ghost danger-text" id="deleteDuplicatesButton" data-i18n="deleteDuplicates">Xóa duplicate</button>
+              </div>
+            </article>
+            <article class="admin-card">
+              <strong data-i18n="reconcileDryRun">Reconcile dry-run</strong>
+              <p data-i18n="reconcileDryRunHint">Quét metadata lỗi nhưng chưa xóa.</p>
+              <button class="ghost" id="reconcileDryRunButton" data-i18n="run">Chạy</button>
+            </article>
+            <article class="admin-card danger-card">
+              <strong data-i18n="reconcileApply">Reconcile xóa lỗi</strong>
+              <p data-i18n="reconcileApplyHint">Xóa metadata không còn tải được từ Telegram.</p>
+              <button class="ghost danger-text" id="reconcileApplyButton" data-i18n="run">Chạy</button>
+            </article>
+            <article class="admin-card">
+              <strong data-i18n="mysqlImport">Import MySQL</strong>
+              <p data-i18n="mysqlImportHint">Import file .sql hoặc .sql.gz.</p>
+              <button class="ghost" id="mysqlImportButton" data-i18n="selectFile">Chọn file</button>
+              <input id="mysqlImportInput" type="file" accept=".sql,.gz,.sql.gz" hidden />
+            </article>
+          </div>
+          <section class="admin-output" id="adminOutput">
+            <div class="empty" data-i18n="adminOutputHint">Chọn một tính năng admin để xem kết quả.</div>
+          </section>
+        </section>
+      </main>
+    </div>
+
+    <div class="toast" id="toast"></div>
+    <div class="transfer-panel hidden" id="transferPanel">
+      <div class="transfer-head">
+        <strong data-i18n="transfers">Tiến trình</strong>
+        <div class="transfer-head-actions">
+          <button type="button" id="transferCollapseButton">−</button>
+          <button type="button" id="transferClearButton">×</button>
+        </div>
+      </div>
+      <div class="transfer-list" id="transferList"></div>
+    </div>
+    <div class="context-menu hidden" id="contextMenu"></div>
+    <div class="drop-overlay hidden" id="dropOverlay">
+      <div>
+        <strong data-i18n="dropToUpload">Thả file để upload</strong>
+        <span data-i18n="dropHint">File sẽ được lưu vào thư mục đang mở</span>
+      </div>
+    </div>
+    <div class="modal-backdrop hidden" id="modalBackdrop">
+      <form class="modal" id="inputModal">
+        <div class="modal-head">
+          <h3 id="modalTitle">Input</h3>
+          <button type="button" class="modal-close" id="modalCloseButton">×</button>
+        </div>
+        <p id="modalDescription"></p>
+        <label class="modal-field" id="modalInputWrap">
+          <span id="modalLabel">Value</span>
+          <input id="modalInput" autocomplete="off" />
+        </label>
+        <div class="modal-actions">
+          <button type="button" class="ghost" id="modalCancelButton" data-i18n="cancel">Hủy</button>
+          <button type="submit" class="primary-action compact" id="modalSubmitButton" data-i18n="confirm">Xác nhận</button>
+        </div>
+      </form>
+    </div>
+    <div class="modal-backdrop hidden" id="authBackdrop">
+      <form class="modal" id="authModal">
+        <div class="modal-head">
+          <h3 data-i18n="loginTitle">Đăng nhập</h3>
+        </div>
+        <p data-i18n="loginHint">Nhập Basic Auth trong file .env. Phiên đăng nhập sẽ được lưu cho tới khi bạn bấm đăng xuất.</p>
+        <label class="modal-field">
+          <span data-i18n="username">Tài khoản</span>
+          <input id="authUser" autocomplete="username" required />
+        </label>
+        <label class="modal-field">
+          <span data-i18n="password">Mật khẩu</span>
+          <input id="authPass" type="password" autocomplete="current-password" required />
+        </label>
+        <div class="modal-actions">
+          <button type="submit" class="primary-action compact" data-i18n="login">Đăng nhập</button>
+        </div>
+      </form>
+    </div>
+    <div class="modal-backdrop hidden" id="choiceBackdrop">
+      <form class="modal" id="choiceModal">
+        <div class="modal-head">
+          <h3 id="choiceTitle">Folder exists</h3>
+          <button type="button" class="modal-close" id="choiceCloseButton">×</button>
+        </div>
+        <p id="choiceDescription"></p>
+        <div class="modal-actions">
+          <button type="button" class="ghost" id="choiceSecondaryButton">Rename</button>
+          <button type="submit" class="primary-action compact" id="choicePrimaryButton">Merge</button>
+        </div>
+      </form>
+    </div>
+    <div class="modal-backdrop hidden" id="folderPickerBackdrop">
+      <form class="modal folder-picker-modal" id="folderPickerModal">
+        <div class="modal-head">
+          <h3 id="folderPickerTitle">Chọn thư mục</h3>
+          <button type="button" class="modal-close" id="folderPickerCloseButton">×</button>
+        </div>
+        <p class="folder-picker-path" id="folderPickerPath">/</p>
+        <div class="folder-picker-list" id="folderPickerList"></div>
+        <div class="modal-actions">
+          <button type="button" class="ghost" id="folderPickerCancelButton" data-i18n="cancel">Hủy</button>
+          <button type="submit" class="primary-action compact" id="folderPickerSelectButton" data-i18n="chooseThisFolder">Chọn thư mục này</button>
+        </div>
+      </form>
+    </div>
+    <div class="viewer-backdrop hidden" id="viewerBackdrop">
+      <section class="viewer">
+        <header class="viewer-head">
+          <div>
+            <h3 id="viewerTitle">Preview</h3>
+            <p id="viewerMeta"></p>
+          </div>
+          <div class="viewer-actions">
+            <button type="button" class="ghost" id="viewerDownloadButton" data-i18n="download">Tải file</button>
+            <button type="button" class="modal-close" id="viewerCloseButton">×</button>
+          </div>
+        </header>
+        <div class="viewer-body" id="viewerBody"></div>
+        <button type="button" class="viewer-nav viewer-prev" id="viewerPrevButton">‹</button>
+        <button type="button" class="viewer-nav viewer-next" id="viewerNextButton">›</button>
+      </section>
+    </div>
+    <script src="/app.js"></script>
+  </body>
+</html>

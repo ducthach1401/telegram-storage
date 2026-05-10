@@ -13,11 +13,15 @@ export const AdminMysqlSubRoute = {
 
 export const AdminFilesSubRoute = {
   DUPLICATES: 'duplicates',
+  DELETE_DUPLICATES: 'duplicates/delete',
 } as const;
 
 export const AdminQueueSubRoute = {
   STATS: 'stats',
   JOBS: 'jobs',
+  RETRY_FAILED: 'jobs/failed/retry',
+  RETRY_JOB: 'jobs/:jobId/retry',
+  DELETE_JOB: 'jobs/:jobId',
   WORKERS: 'workers',
 } as const;
 

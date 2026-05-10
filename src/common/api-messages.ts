@@ -19,6 +19,8 @@ export const ApiExceptionMessage = {
   META_BATCH_TOO_MANY_IDS: 'Quá nhiều id trong batch — giảm số lượng',
   FOLDER_ZIP_JOB_NOT_READY: 'Job ZIP chưa hoàn thành hoặc không có kết quả',
   MISSING_MULTIPART_FILE: 'Thiếu file (form field `file`)',
+  TELEGRAM_FILE_TOO_BIG:
+    'File vượt giới hạn tải lại của Telegram Bot API. Giảm kích thước file hoặc dùng local Bot API server/userbot nếu muốn lưu file lớn.',
   MYSQL_IMPORT_FAILED:
     'Import MySQL thất bại — kiểm tra file SQL/gzip và stderr trong response',
   QUEUE_JOB_CREATE_FAILED: 'Không tạo được job trên queue',

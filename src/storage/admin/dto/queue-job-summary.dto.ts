@@ -14,6 +14,18 @@ export class QueueJobSummaryDto {
   attemptsMade?: number;
 
   @ApiPropertyOptional()
+  attempts?: number;
+
+  @ApiPropertyOptional({ description: 'Tên file upload, không gồm đường dẫn file tạm' })
+  fileName?: string;
+
+  @ApiPropertyOptional()
+  mimeType?: string;
+
+  @ApiPropertyOptional({ description: 'Có thể retry lại job failed hay không' })
+  canRetry?: boolean;
+
+  @ApiPropertyOptional()
   failedReason?: string;
 
   @ApiPropertyOptional({ description: 'Unix ms khi tạo job' })

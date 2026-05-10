@@ -9,6 +9,20 @@ import {
   TELEGRAM_FILE_API_BASE,
 } from '../telegram.constants';
 
+interface TelegramFileLike {
+  file_id?: string;
+  file_unique_id?: string;
+  thumbnail?: {
+    file_id?: string;
+  };
+}
+
+interface UploadedTelegramFile {
+  fileId: string;
+  fileUniqueId: string;
+  thumbnailFileId: string | null;
+}
+
 @Injectable()
 export class TelegramService implements OnModuleInit {
   private bot!: Bot;
@@ -38,16 +52,39 @@ export class TelegramService implements OnModuleInit {
         : undefined;
     const msg = await this.bot.api.sendDocument(this.chatId, new InputFile(buffer, filename), {
       thumbnail: thumb,
+      disable_content_type_detection: true,
     });
-    const doc = msg.document;
-    if (!doc) {
+    const uploaded = TelegramService.extractUploadedFile(msg);
+    if (!uploaded) {
       throw new Error(TelegramIntegrationMessage.NO_DOCUMENT_AFTER_SEND);
     }
     return {
       messageId: msg.message_id,
-      fileId: doc.file_id,
-      fileUniqueId: doc.file_unique_id,
-      thumbnailFileId: doc.thumbnail?.file_id ?? null,
+      ...uploaded,
+    };
+  }
+
+  private static extractUploadedFile(msg: unknown): UploadedTelegramFile | null {
+    const m = msg as {
+      document?: TelegramFileLike;
+      animation?: TelegramFileLike;
+      video?: TelegramFileLike;
+      sticker?: TelegramFileLike;
+      photo?: TelegramFileLike[];
+    };
+    const file =
+      m.document ??
+      m.animation ??
+      m.video ??
+      m.sticker ??
+      (Array.isArray(m.photo) ? m.photo.at(-1) : undefined);
+    if (!file?.file_id || !file.file_unique_id) {
+      return null;
+    }
+    return {
+      fileId: file.file_id,
+      fileUniqueId: file.file_unique_id,
+      thumbnailFileId: file.thumbnail?.file_id ?? null,
     };
   }
 

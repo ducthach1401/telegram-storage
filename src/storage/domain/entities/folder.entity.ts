@@ -34,6 +34,16 @@ export class Folder {
   @Column()
   name: string;
 
+  @Index()
+  @Column({ type: 'datetime', nullable: true })
+  deletedAt: Date | null;
+
+  @Column({ type: 'varchar', nullable: true })
+  deletedOriginalParentId: string | null;
+
+  @Column({ type: 'varchar', nullable: true })
+  deletedOriginalName: string | null;
+
   @CreateDateColumn()
   createdAt: Date;
 }
