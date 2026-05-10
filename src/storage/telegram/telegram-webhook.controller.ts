@@ -35,7 +35,7 @@ export class TelegramWebhookController {
   @ApiOperation({
     summary: 'Webhook Telegram (đồng bộ ngược document vào DB)',
     description:
-      'Đặt URL này trong BotFather / `setWebhook`. Tuỳ chọn header `X-Telegram-Bot-Api-Secret-Token` khớp `TELEGRAM_WEBHOOK_SECRET`. Tin khớp `telegram_storage_chat_id` trên account hoặc `TELEGRAM_STORAGE_CHAT_FOR_PUBLIC_ID` (Cài đặt server) → ingest vào drive admin đầu tiên.',
+      'Đặt URL này trong BotFather / `setWebhook`. Tuỳ chọn header `X-Telegram-Bot-Api-Secret-Token` khớp `TELEGRAM_WEBHOOK_SECRET`. Tin khớp `telegram_storage_chat_id` trên một account → ingest vào drive account đó. Chat đúng `TELEGRAM_STORAGE_CHAT_FOR_PUBLIC_ID` **không** ingest qua webhook (multi-account + upload API đã ghi DB; ingest trùng message/file_unique_id với user khác).',
     security: [],
   })
   @ApiUnauthorizedResponse({ description: 'TELEGRAM_WEBHOOK_SECRET không khớp' })

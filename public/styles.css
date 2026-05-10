@@ -209,6 +209,11 @@ button:disabled {
   text-align: left;
 }
 
+/* Thuộc tính HTML hidden mặc định bị display:flex của .nav-item đè — chỉ admin thấy Queue / Admin */
+.nav-item[hidden] {
+  display: none !important;
+}
+
 .nav-item.active,
 .nav-item:hover {
   background: var(--primary-soft);
@@ -2080,6 +2085,11 @@ button:disabled {
   font-size: 13px;
   color: var(--muted);
   line-height: 1.45;
+}
+
+/* Giống sidebar nav: class .hidden dùng khắp app nhưng không có rule chung — các panel khác có .panel.hidden riêng */
+.settings-admin-wrap.hidden {
+  display: none !important;
 }
 
 .settings-admin-head {

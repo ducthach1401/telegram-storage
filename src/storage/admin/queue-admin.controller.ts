@@ -10,6 +10,7 @@ import {
   Param,
   Post,
   Query,
+  UseGuards,
 } from '@nestjs/common';
 import {
   ApiBadRequestResponse,
@@ -22,6 +23,9 @@ import {
 } from '@nestjs/swagger';
 import { Job, Queue } from 'bullmq';
 import { stat, unlink } from 'fs/promises';
+import { AccountRole } from '../../accounts/account-role.enum';
+import { Roles } from '../../accounts/roles.decorator';
+import { RolesGuard } from '../../accounts/roles.guard';
 import { ApiExceptionMessage } from '../../common/api-messages';
 import { API_V1_PREFIX } from '../../common/api-route';
 import {
@@ -42,6 +46,8 @@ import { QueueWorkersResponseDto } from './dto/queue-workers-response.dto';
 
 @ApiTags('admin')
 @Controller(`${API_V1_PREFIX}/${AdminControllerPath.QUEUE}`)
+@UseGuards(RolesGuard)
+@Roles(AccountRole.ADMIN)
 export class QueueAdminController {
   constructor(
     @InjectQueue(FILE_UPLOAD_QUEUE)

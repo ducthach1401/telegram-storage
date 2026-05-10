@@ -5,6 +5,7 @@ import {
   HttpStatus,
   Post,
   UploadedFile,
+  UseGuards,
   UseInterceptors,
 } from '@nestjs/common';
 import {
@@ -16,6 +17,9 @@ import {
   ApiTags,
 } from '@nestjs/swagger';
 import { unlink } from 'fs/promises';
+import { AccountRole } from '../../accounts/account-role.enum';
+import { Roles } from '../../accounts/roles.decorator';
+import { RolesGuard } from '../../accounts/roles.guard';
 import { ApiExceptionMessage } from '../../common/api-messages';
 import { API_V1_PREFIX } from '../../common/api-route';
 import { FileMultipart } from '../storage-http.constants';
@@ -43,6 +47,8 @@ function dumpFilenameSuffix(original: string): string {
 
 @ApiTags('admin')
 @Controller(`${API_V1_PREFIX}/${AdminControllerPath.MYSQL}`)
+@UseGuards(RolesGuard)
+@Roles(AccountRole.ADMIN)
 export class MysqlImportController {
   constructor(private readonly mysqlImport: MysqlImportService) {}
 

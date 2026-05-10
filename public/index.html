@@ -58,11 +58,13 @@
           </div>
           <div class="quota-bar"><span id="quotaBar"></span></div>
           <p class="quota-usage" id="quotaTotal">--</p>
-          <div class="quota-header mini">
-            <span data-i18n="minioQuotaLabel">MinIO</span>
+          <div id="sidebarMinioQuotaSection">
+            <div class="quota-header mini">
+              <span data-i18n="minioQuotaLabel">MinIO</span>
+            </div>
+            <div class="quota-bar minio"><span id="minioQuotaBar"></span></div>
+            <p class="quota-usage" id="minioQuotaDetail">--</p>
           </div>
-          <div class="quota-bar minio"><span id="minioQuotaBar"></span></div>
-          <p class="quota-usage" id="minioQuotaDetail">--</p>
         </section>
 
         <div class="sidebar-actions">
@@ -206,10 +208,18 @@
           <div class="panel-head">
             <div>
               <h2 data-i18n="settings">Cài đặt</h2>
-              <p data-i18n="settingsHint">Quota MinIO và giới hạn upload theo tài khoản.</p>
+              <p id="settingsHeadHint"></p>
             </div>
           </div>
-          <div id="settingsSelfCard"></div>
+          <div class="settings-admin-wrap hidden" id="settingsAdminSection">
+            <div class="settings-admin-head">
+              <h3 data-i18n="adminAccountQuotaTitle">Quota MinIO theo tài khoản</h3>
+              <button type="button" class="ghost compact" id="settingsAccountsRefreshButton" data-i18n="refresh">
+                Làm mới
+              </button>
+            </div>
+            <div id="settingsAccountsTable" class="settings-accounts-table-wrap"></div>
+          </div>
           <div class="settings-admin-wrap hidden" id="settingsSystemSection">
             <div class="settings-admin-head">
               <h3 data-i18n="systemSettingsTitle">Cấu hình server</h3>
@@ -222,15 +232,7 @@
             </p>
             <div id="settingsSystemFormMount"></div>
           </div>
-          <div class="settings-admin-wrap hidden" id="settingsAdminSection">
-            <div class="settings-admin-head">
-              <h3 data-i18n="adminAccountQuotaTitle">Quota MinIO theo tài khoản</h3>
-              <button type="button" class="ghost compact" id="settingsAccountsRefreshButton" data-i18n="refresh">
-                Làm mới
-              </button>
-            </div>
-            <div id="settingsAccountsTable" class="settings-accounts-table-wrap"></div>
-          </div>
+          <div id="settingsSelfCard"></div>
         </section>
       </main>
     </div>

@@ -1528,26 +1528,33 @@ export class StorageService implements OnModuleInit {
   async findDuplicateFileGroups(): Promise<
     Array<{ telegramFileUniqueId: string | null; contentSha256: string | null; files: StoredFile[] }>
   > {
+    /** Theo account — Telegram tái sử dụng `file_unique_id` cho cùng bot/kênh; không được coi là “trùng” giữa hai user. */
     const hashRows = await this.fileRepo
       .createQueryBuilder('f')
+      .innerJoin('f.folder', 'mf')
       .select('f.contentSha256', 'contentSha256')
+      .addSelect('mf.accountId', 'accountId')
       .addSelect('COUNT(*)', 'cnt')
       .where('f.deletedAt IS NULL')
       .andWhere('f.contentSha256 IS NOT NULL')
       .groupBy('f.contentSha256')
+      .addGroupBy('mf.accountId')
       .having('COUNT(*) > :n', { n: 1 })
-      .getRawMany<{ contentSha256: string }>();
+      .getRawMany<{ contentSha256: string; accountId: string }>();
 
     const telegramRows = await this.fileRepo
       .createQueryBuilder('f')
+      .innerJoin('f.folder', 'mf')
       .select('f.telegramFileUniqueId', 'telegramFileUniqueId')
+      .addSelect('mf.accountId', 'accountId')
       .addSelect('COUNT(*)', 'cnt')
       .where('f.deletedAt IS NULL')
       .andWhere('f.contentSha256 IS NULL')
       .andWhere('f.telegramFileUniqueId IS NOT NULL')
       .groupBy('f.telegramFileUniqueId')
+      .addGroupBy('mf.accountId')
       .having('COUNT(*) > :n', { n: 1 })
-      .getRawMany<{ telegramFileUniqueId: string }>();
+      .getRawMany<{ telegramFileUniqueId: string; accountId: string }>();
 
     const groups: Array<{
       telegramFileUniqueId: string | null;
@@ -1555,19 +1562,29 @@ export class StorageService implements OnModuleInit {
       files: StoredFile[];
     }> = [];
     for (const r of hashRows) {
-      const files = await this.fileRepo.find({
-        where: { contentSha256: r.contentSha256, deletedAt: IsNull() },
-        relations: { tags: true },
-        order: { createdAt: TYPEORM_ORDER_ASC },
-      });
+      const files = await this.fileRepo
+        .createQueryBuilder('f')
+        .leftJoinAndSelect('f.tags', 'tag')
+        .innerJoin('f.folder', 'mf')
+        .where('f.contentSha256 = :h', { h: r.contentSha256 })
+        .andWhere('mf.accountId = :aid', { aid: r.accountId })
+        .andWhere('f.deletedAt IS NULL')
+        .orderBy('f.createdAt', TYPEORM_ORDER_ASC)
+        .addOrderBy('f.id', TYPEORM_ORDER_ASC)
+        .getMany();
       groups.push({ telegramFileUniqueId: files[0]?.telegramFileUniqueId ?? null, contentSha256: r.contentSha256, files });
     }
     for (const r of telegramRows) {
-      const files = await this.fileRepo.find({
-        where: { telegramFileUniqueId: r.telegramFileUniqueId, deletedAt: IsNull() },
-        relations: { tags: true },
-        order: { createdAt: TYPEORM_ORDER_ASC },
-      });
+      const files = await this.fileRepo
+        .createQueryBuilder('f')
+        .leftJoinAndSelect('f.tags', 'tag')
+        .innerJoin('f.folder', 'mf')
+        .where('f.telegramFileUniqueId = :uid', { uid: r.telegramFileUniqueId })
+        .andWhere('mf.accountId = :aid', { aid: r.accountId })
+        .andWhere('f.deletedAt IS NULL')
+        .orderBy('f.createdAt', TYPEORM_ORDER_ASC)
+        .addOrderBy('f.id', TYPEORM_ORDER_ASC)
+        .getMany();
       groups.push({ telegramFileUniqueId: r.telegramFileUniqueId, contentSha256: null, files });
     }
     return groups;

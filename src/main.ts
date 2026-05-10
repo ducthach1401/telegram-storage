@@ -2,6 +2,7 @@ import { ValidationPipe } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { NestFactory } from "@nestjs/core";
 import { NestExpressApplication } from "@nestjs/platform-express";
+import type { NextFunction, Request, Response } from "express";
 import { join } from "path";
 import { AppModule } from "./app/app.module";
 import { ApiExceptionMessage } from "./common/api-messages";
@@ -24,7 +25,8 @@ async function bootstrap() {
 
   app.enableShutdownHooks();
   app.enableCors();
-  app.useStaticAssets(join(process.cwd(), "public"));
+  const publicDir = join(process.cwd(), "public");
+  app.useStaticAssets(publicDir);
   setupSwagger(app);
   app.useGlobalPipes(
     new ValidationPipe({
@@ -33,6 +35,40 @@ async function bootstrap() {
       transformOptions: { enableImplicitConversion: true },
     }),
   );
+
+  const httpApp = app.getHttpAdapter().getInstance();
+
+  httpApp.get("/swagger", (_req: Request, res: Response) =>
+    res.redirect(302, "/api/documentation"),
+  );
+  httpApp.get("/docs", (_req: Request, res: Response) =>
+    res.redirect(302, "/api/documentation"),
+  );
+  httpApp.get("/login", (_req: Request, res: Response) =>
+    res.redirect(302, "/login.html"),
+  );
+  httpApp.get("/register", (_req: Request, res: Response) =>
+    res.redirect(302, "/register.html"),
+  );
+
+  /** Deep-link SPA / bookmark không có `#`: tránh 404 khi không phải `/api/*` hay file tĩnh có đuôi. */
+  httpApp.use((req: Request, res: Response, next: NextFunction) => {
+    if (req.method !== "GET" && req.method !== "HEAD") {
+      next();
+      return;
+    }
+    if (req.path.startsWith("/api")) {
+      next();
+      return;
+    }
+    if (/\.\w+$/.test(req.path)) {
+      next();
+      return;
+    }
+    res.sendFile(join(publicDir, "index.html"), (err) => {
+      if (err) next(err);
+    });
+  });
 
   const port = Number(config.getOrThrow<string>(EnvKey.APP_PORT));
   await app.listen(port);

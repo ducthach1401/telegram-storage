@@ -1,9 +1,19 @@
-import { Body, Controller, HttpCode, HttpStatus, Post } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  HttpCode,
+  HttpStatus,
+  Post,
+  UseGuards,
+} from '@nestjs/common';
 import {
   ApiOkResponse,
   ApiOperation,
   ApiTags,
 } from '@nestjs/swagger';
+import { AccountRole } from '../../accounts/account-role.enum';
+import { Roles } from '../../accounts/roles.decorator';
+import { RolesGuard } from '../../accounts/roles.guard';
 import { API_V1_PREFIX } from '../../common/api-route';
 import {
   AdminControllerPath,
@@ -15,6 +25,8 @@ import { ReconcileService } from './reconcile.service';
 
 @ApiTags('admin')
 @Controller(`${API_V1_PREFIX}/${AdminControllerPath.RECONCILE}`)
+@UseGuards(RolesGuard)
+@Roles(AccountRole.ADMIN)
 export class ReconcileController {
   constructor(private readonly reconcile: ReconcileService) {}
 

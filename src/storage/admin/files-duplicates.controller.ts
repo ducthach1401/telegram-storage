@@ -1,5 +1,15 @@
-import { Controller, Get, HttpCode, HttpStatus, Post } from '@nestjs/common';
+import {
+  Controller,
+  Get,
+  HttpCode,
+  HttpStatus,
+  Post,
+  UseGuards,
+} from '@nestjs/common';
 import { ApiOkResponse, ApiOperation, ApiTags } from '@nestjs/swagger';
+import { AccountRole } from '../../accounts/account-role.enum';
+import { Roles } from '../../accounts/roles.decorator';
+import { RolesGuard } from '../../accounts/roles.guard';
 import { API_V1_PREFIX } from '../../common/api-route';
 import {
   DuplicateCleanupResponseDto,
@@ -16,6 +26,8 @@ import {
 
 @ApiTags('admin')
 @Controller(`${API_V1_PREFIX}/${AdminControllerPath.FILES}`)
+@UseGuards(RolesGuard)
+@Roles(AccountRole.ADMIN)
 export class FilesDuplicatesController {
   constructor(private readonly storage: StorageService) {}
 
@@ -23,7 +35,7 @@ export class FilesDuplicatesController {
   @ApiOperation({
     summary: 'Nhóm file trùng binary Telegram',
     description:
-      'Cùng `telegram_file_unique_id` nhưng nhiều bản ghi DB (ví dụ sau copy thư mục).',
+      'Trùng **trong cùng một account**: cùng `telegram_file_unique_id` hoặc `contentSha256` nhưng nhiều bản ghi DB (copy folder, race…). Telegram tái dùng `file_unique_id` giữa user khác nhau trên cùng bot — không gộp xuyên account.',
   })
   @ApiOkResponse({ type: DuplicateFilesResponseDto })
   async duplicates(): Promise<DuplicateFilesResponseDto> {
@@ -41,7 +53,7 @@ export class FilesDuplicatesController {
   @ApiOperation({
     summary: 'Xóa mềm file trùng binary Telegram',
     description:
-      'Giữ bản cũ nhất trong mỗi nhóm `telegram_file_unique_id`, đưa các bản còn lại vào thùng rác.',
+      'Giữ bản cũ nhất trong mỗi nhóm trùng **theo từng account** (`telegram_file_unique_id` hoặc SHA256), đưa các bản còn lại vào thùng rác.',
   })
   @ApiOkResponse({ type: DuplicateCleanupResponseDto })
   async deleteDuplicates(): Promise<DuplicateCleanupResponseDto> {

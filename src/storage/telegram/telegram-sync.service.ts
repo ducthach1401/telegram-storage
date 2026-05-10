@@ -1,5 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { AccountService } from '../../accounts/account.service';
+import { EnvKey } from '../../common/env-keys';
+import { RuntimeConfigService } from '../../settings/runtime-config.service';
 import { StorageService } from '../storage.service';
 
 @Injectable()
@@ -7,6 +9,7 @@ export class TelegramSyncService {
   constructor(
     private readonly accounts: AccountService,
     private readonly storage: StorageService,
+    private readonly runtime: RuntimeConfigService,
   ) {}
 
   /**
@@ -26,7 +29,15 @@ export class TelegramSyncService {
       return;
     }
 
-    const chatIdStr = String(chat.id);
+    const chatIdStr = String(chat.id).trim();
+    const sharedPublicChat = (
+      this.runtime.effectiveTrimmed(EnvKey.TELEGRAM_STORAGE_CHAT_FOR_PUBLIC_ID) ?? ''
+    ).trim();
+    if (sharedPublicChat && sharedPublicChat === chatIdStr) {
+      /* Chat chung cho nhiều account: upload đã ghi DB qua API — ingest admin duplicate message_id / file_unique_id với user khác. */
+      return;
+    }
+
     const account = await this.accounts.findByTelegramStorageChatId(chatIdStr);
     if (!account) {
       return;

@@ -35,6 +35,10 @@ const PREVIEW_CACHE_NAME = "tg-drive-preview-cache-v1";
 const UPLOAD_DB_NAME = "tg-drive-upload-queue";
 const UPLOAD_STORE_NAME = "uploads";
 const UPLOAD_RETRY_DELAY_MS = 15000;
+/** Poll GET …/upload/jobs/:id — worker Telegram có thể giữ job `active` vài phút. */
+const UPLOAD_JOB_POLL_QUICK_MS = 1200;
+const UPLOAD_JOB_POLL_MEDIUM_MS = 3000;
+const UPLOAD_JOB_POLL_SLOW_MS = 5000;
 const objectUrlCache = new Map();
 
 function isCompactTransferMode() {
@@ -81,7 +85,9 @@ const i18n = {
     settings: "Cài đặt",
     admin: "Admin/API",
     settingsHint:
-      "Quota MinIO, chỉnh bot Telegram / chat lưu file và giới hạn upload theo tài khoản.",
+      "Quota MinIO, cấu hình server, chỉnh bot Telegram / chat lưu file và giới hạn upload theo tài khoản.",
+    settingsHintNonAdmin: "Thông tin tài khoản và kết nối Telegram.",
+    telegramSaveConnection: "Lưu kết nối Telegram",
     minioQuotaLabel: "MinIO",
     adminAccountQuotaTitle: "Quota MinIO theo tài khoản (admin)",
     accountLabel: "Tài khoản",
@@ -203,6 +209,9 @@ const i18n = {
     addDuplicateAnyway: "Vẫn add",
     skipDuplicateUpload: "Bỏ qua",
     duplicateSkipped: "Đã bỏ qua ảnh trùng",
+    uploadJobTimedOut: "Hết thời gian chờ xử lý server",
+    uploadJobTimedOutToast:
+      "Tiến trình dừng theo dõi — upload có thể vẫn chạy nền. Kiểm tra Drive hoặc Queue lỗi.",
     folderPickerUnsupported: "Trình duyệt này chưa hỗ trợ chọn folder không popup. Hãy kéo thả folder vào Drive.",
     folderCreated: "Đã tạo thư mục",
     copied: "Đã copy link",
@@ -261,7 +270,10 @@ const i18n = {
     queue: "Failed queue",
     settings: "Settings",
     admin: "Admin/API",
-    settingsHint: "MinIO quota, Telegram bot/storage chat, and upload limits for your account.",
+    settingsHint:
+      "MinIO quota, server configuration, Telegram bot/storage chat, and per-account upload limits.",
+    settingsHintNonAdmin: "Account info and Telegram connection.",
+    telegramSaveConnection: "Save Telegram connection",
     minioQuotaLabel: "MinIO",
     adminAccountQuotaTitle: "Per-account MinIO quota (admin)",
     accountLabel: "Account",
@@ -382,6 +394,9 @@ const i18n = {
     addDuplicateAnyway: "Add anyway",
     skipDuplicateUpload: "Skip",
     duplicateSkipped: "Duplicate image skipped",
+    uploadJobTimedOut: "Timed out waiting for server processing",
+    uploadJobTimedOutToast:
+      "Stopped polling — the upload may still run in the background. Check Drive or the failed queue.",
     folderPickerUnsupported: "This browser does not support popup-free folder picking. Drag and drop the folder into Drive instead.",
     folderCreated: "Folder created",
     copied: "Link copied",
@@ -454,6 +469,10 @@ function parseStoredJson(key) {
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => Array.from(document.querySelectorAll(selector));
 const t = (key) => i18n[state.lang][key] || key;
+
+function accountIsAdmin() {
+  return String(state.accountProfile?.role ?? "").toLowerCase() === "admin";
+}
 
 function formatBytes(bytes) {
   const n = Number(bytes || 0);
@@ -736,7 +755,7 @@ async function processUploadQueue() {
       try {
         const queued = await uploadFileRecord(record);
         updateTransfer(record.id, { status: t("processing"), speed: 0, error: false, cancelable: false });
-        const result = await watchUploadJob(queued.jobId, record.id);
+        const result = await watchUploadJob(queued.jobId, record.id, record.file?.size ?? 0);
         if (result === "addDuplicateAnyway") {
           record.allowDuplicateContent = true;
           record.status = "queued";
@@ -877,6 +896,60 @@ function openConfirmModal({ title, description }) {
     };
     document.onkeydown = (event) => {
       if (event.key === "Escape") close(false);
+    };
+  });
+}
+
+function openReadOnlyInfoModal(title, text) {
+  return new Promise((resolve) => {
+    const backdrop = $("#modalBackdrop");
+    const form = $("#inputModal");
+    const inputWrap = $("#modalInputWrap");
+    const desc = $("#modalDescription");
+    const submitBtn = $("#modalSubmitButton");
+    const cancelBtn = $("#modalCancelButton");
+    const cleanup = () => {
+      backdrop.classList.add("hidden");
+      form.onsubmit = null;
+      cancelBtn.onclick = null;
+      $("#modalCloseButton").onclick = null;
+      backdrop.onclick = null;
+      document.onkeydown = null;
+      desc.textContent = "";
+      desc.style.display = "";
+      desc.style.whiteSpace = "";
+      desc.style.maxHeight = "";
+      desc.style.overflow = "";
+      inputWrap.style.display = "grid";
+      cancelBtn.style.display = "";
+      submitBtn.textContent = t("confirm");
+    };
+    const close = () => {
+      cleanup();
+      resolve();
+    };
+
+    $("#modalTitle").textContent = title;
+    inputWrap.style.display = "none";
+    cancelBtn.style.display = "none";
+    desc.textContent = text;
+    desc.style.display = "block";
+    desc.style.whiteSpace = "pre-wrap";
+    desc.style.maxHeight = "min(60vh, 520px)";
+    desc.style.overflow = "auto";
+    submitBtn.textContent = t("confirm");
+
+    backdrop.classList.remove("hidden");
+    form.onsubmit = (event) => {
+      event.preventDefault();
+      close();
+    };
+    $("#modalCloseButton").onclick = () => close();
+    backdrop.onclick = (event) => {
+      if (event.target === backdrop) close();
+    };
+    document.onkeydown = (event) => {
+      if (event.key === "Escape") close();
     };
   });
 }
@@ -1112,6 +1185,28 @@ function applyAppConfig(data) {
     };
   }
   renderSettingsSelf();
+  syncAdminOnlyNavVisibility();
+  syncSidebarMinioQuotaVisibility();
+  if (!accountIsAdmin() && (state.view === "admin" || state.view === "queue")) {
+    state.view = "drive";
+  }
+}
+
+function syncSidebarMinioQuotaVisibility() {
+  const el = $("#sidebarMinioQuotaSection");
+  if (!el) return;
+  /** Admin luôn xem block MinIO; user chỉ khi đã được cấp quota (> 0 từ /auth/verify). */
+  const lim = Number(state.accountProfile?.minioLimitBytes ?? 0);
+  el.hidden = !(accountIsAdmin() || lim > 0);
+}
+
+/** Queue lỗi + Admin/API chỉ cho role admin (đồng bộ với backend RolesGuard). */
+function syncAdminOnlyNavVisibility() {
+  const show = accountIsAdmin();
+  $$('.nav-item[data-view="queue"], .nav-item[data-view="admin"]').forEach((btn) => {
+    btn.hidden = !show;
+    btn.setAttribute("aria-hidden", show ? "false" : "true");
+  });
 }
 
 async function loadAppConfig() {
@@ -1120,8 +1215,9 @@ async function loadAppConfig() {
 }
 
 function logout() {
+  localStorage.removeItem(NAV_STORAGE_KEY);
   clearAuth();
-  location.reload();
+  window.location.replace("/login.html");
 }
 
 function applyLanguage() {
@@ -1139,7 +1235,9 @@ function applyLanguage() {
   renderBreadcrumbs();
   syncSelectionModeUi();
   renderSettingsSelf();
-  if (state.view === "settings" && state.accountProfile?.role === "admin") {
+  syncAdminOnlyNavVisibility();
+  syncSidebarMinioQuotaVisibility();
+  if (state.view === "settings" && accountIsAdmin()) {
     void loadRuntimeSettingsAdmin().catch(showError);
     void loadAdminAccountsForSettings().catch(showError);
   }
@@ -1147,6 +1245,9 @@ function applyLanguage() {
 
 function setView(view, opts = {}) {
   if (!["drive", "trash", "queue", "settings", "admin"].includes(view)) {
+    view = "drive";
+  }
+  if (state.accountProfile && !accountIsAdmin() && (view === "admin" || view === "queue")) {
     view = "drive";
   }
   state.view = view;
@@ -2516,13 +2617,18 @@ function renderSettingsSelf() {
   const adminWrap = $("#settingsAdminSection");
   if (!root) return;
   const profile = state.accountProfile;
+  const headHint = $("#settingsHeadHint");
   if (!profile) {
     root.innerHTML = `<p class="settings-muted">${escapeHtml(t("loadingProfile"))}</p>`;
     if (adminWrap) adminWrap.classList.add("hidden");
+    if (headHint) headHint.textContent = "";
     return;
   }
+  if (headHint) {
+    headHint.textContent = accountIsAdmin() ? t("settingsHint") : t("settingsHintNonAdmin");
+  }
   const hint =
-    profile.minioLimitBytes <= 0
+    accountIsAdmin() && profile.minioLimitBytes <= 0
       ? `<p class="settings-muted">${escapeHtml(t("minioDisabledHint"))}</p>`
       : "";
   const usePlat = profile.telegramUsePlatformDefaults !== false;
@@ -2556,7 +2662,7 @@ function renderSettingsSelf() {
           </label>
         </div>
         <div class="settings-telegram-actions">
-          <button type="button" class="primary-action compact" id="selfTelegramSave">${escapeHtml(t("saveQuota"))}</button>
+          <button type="button" class="primary-action compact" id="selfTelegramSave">${escapeHtml(t("telegramSaveConnection"))}</button>
         </div>
       </div>
       ${hint}
@@ -2564,16 +2670,16 @@ function renderSettingsSelf() {
   wireSelfTelegramForm();
   const sysWrap = $("#settingsSystemSection");
   if (sysWrap) {
-    sysWrap.classList.toggle("hidden", profile.role !== "admin");
+    sysWrap.classList.toggle("hidden", !accountIsAdmin());
   }
   if (adminWrap) {
-    adminWrap.classList.toggle("hidden", profile.role !== "admin");
+    adminWrap.classList.toggle("hidden", !accountIsAdmin());
   }
 }
 
 async function loadSettingsView() {
   renderSettingsSelf();
-  if (state.accountProfile?.role === "admin") {
+  if (accountIsAdmin()) {
     await loadRuntimeSettingsAdmin();
     await loadAdminAccountsForSettings();
   }
@@ -2648,7 +2754,7 @@ function collectRuntimeSettingsPatch() {
 
 async function loadRuntimeSettingsAdmin() {
   const mount = $("#settingsSystemFormMount");
-  if (!mount || state.accountProfile?.role !== "admin") return;
+  if (!mount || !accountIsAdmin()) return;
   mount.innerHTML = `<p class="settings-muted">${escapeHtml(t("loadingProfile"))}</p>`;
   try {
     const data = await api("/admin/settings");
@@ -2712,7 +2818,7 @@ async function saveAccountQuotaRow(accountId, inputEl, buttonEl) {
 
 async function loadAdminAccountsForSettings() {
   const wrap = $("#settingsAccountsTable");
-  if (!wrap || state.accountProfile?.role !== "admin") return;
+  if (!wrap || !accountIsAdmin()) return;
   wrap.innerHTML = `<p class="settings-muted">${escapeHtml(t("loadingProfile"))}</p>`;
   try {
     const rows = await api("/admin/accounts");
@@ -3066,10 +3172,12 @@ async function uploadWithProgress(path, form, file, transferId = createTransfer(
     xhr.setRequestHeader("X-Auth-Mode", "app");
     state.transferAborters.set(transferId, () => xhr.abort());
     xhr.upload.onprogress = (event) => {
+      const tr = state.transfers.get(transferId);
+      if (!tr) return;
       const now = performance.now();
       const elapsed = Math.max(1, now - lastTime) / 1000;
       const instantSpeed = (event.loaded - lastLoaded) / elapsed;
-      const averageSpeed = event.loaded / Math.max(0.001, (now - state.transfers.get(transferId).startedAt) / 1000);
+      const averageSpeed = event.loaded / Math.max(0.001, (now - tr.startedAt) / 1000);
       const speed = instantSpeed || averageSpeed;
       lastLoaded = event.loaded;
       lastTime = now;
@@ -3125,6 +3233,27 @@ async function uploadFiles(files) {
   }
 }
 
+/** Một số FS/mount trả `\\` trong webkitRelativePath — chuẩn hóa và bỏ segment folder gốc đã chọn. */
+function normalizedFolderEntryRelativePath(webkitRelativePath, fileName) {
+  const parts = String(webkitRelativePath || "")
+    .replace(/\\/g, "/")
+    .split("/")
+    .filter(Boolean);
+  if (parts.length <= 1) return fileName || parts[0] || "";
+  return parts.slice(1).join("/") || fileName || "";
+}
+
+/**
+ * Chromium/Linux đôi khi chèn pseudo-file cho thư mục: `webkitRelativePath` chỉ một segment (tên folder gốc),
+ * không phải `Root/file…`. Không đưa vào queue upload — folder đã được tạo qua API bằng các entry thật.
+ */
+function isWebkitRelativeDirectoryArtifact(file) {
+  const wrp = String(file.webkitRelativePath || "").replace(/\\/g, "/").trim();
+  if (!wrp) return false;
+  const segments = wrp.split("/").filter(Boolean);
+  return segments.length < 2;
+}
+
 async function uploadFileToFolder(file, folderId) {
   if (!file) return;
   await enqueueUpload(file, folderId);
@@ -3133,11 +3262,11 @@ async function uploadFileToFolder(file, folderId) {
 async function uploadFolderFiles(fileList) {
   const files = Array.from(fileList || []).filter((file) => file.webkitRelativePath);
   if (!files.length) return;
-  const firstPath = files[0].webkitRelativePath;
-  const rootName = firstPath.split("/")[0] || "folder";
+  const firstNorm = String(files[0].webkitRelativePath).replace(/\\/g, "/");
+  const rootName = firstNorm.split("/").filter(Boolean)[0] || "folder";
   const entries = files.map((file) => ({
     file,
-    relativePath: file.webkitRelativePath.split("/").slice(1).join("/") || file.name,
+    relativePath: normalizedFolderEntryRelativePath(file.webkitRelativePath, file.name),
   }));
   await uploadFolderEntries(rootName, entries);
 }
@@ -3154,22 +3283,32 @@ async function uploadFolderFromPicker() {
 
 async function uploadFolderEntries(rootName, entries) {
   if (!entries.length) return;
+
+  const filteredEntries = entries.filter((entry) => !isWebkitRelativeDirectoryArtifact(entry.file));
+
   const validEntries = [];
   let skipped = 0;
-  for (const entry of entries) {
+  for (const entry of filteredEntries) {
     if (canUploadFile(entry.file)) {
       validEntries.push(entry);
     } else {
       skipped++;
     }
   }
-  if (!validEntries.length) return;
+
   const rootFolder = await resolveRootUploadFolder(rootName);
   const folderMap = new Map([["", rootFolder.id]]);
+
+  if (!validEntries.length) {
+    await Promise.all([loadDrive(), loadQuota()]);
+    toast(t("folderCreated"));
+    return;
+  }
+
   const queuedUploads = [];
 
   for (const entry of validEntries) {
-    const parts = entry.relativePath.split("/").filter(Boolean);
+    const parts = String(entry.relativePath || "").replace(/\\/g, "/").split("/").filter(Boolean);
     const fileName = parts.pop() || entry.file.name;
     let parentId = rootFolder.id;
     let key = "";
@@ -3300,10 +3439,41 @@ function readFileEntry(fileEntry) {
   });
 }
 
-async function watchUploadJob(jobId, transferId) {
-  for (let attempt = 0; attempt < 25; attempt++) {
-    await delay(attempt < 4 ? 1000 : 2500);
-    const status = await api(`/files/upload/jobs/${encodeURIComponent(jobId)}`);
+function uploadJobPollBudget(fileSizeBytes) {
+  const mb = Number(fileSizeBytes) / (1024 * 1024);
+  if (mb > 120) return 260;
+  if (mb > 40) return 180;
+  if (mb > 12) return 140;
+  return 100;
+}
+
+async function watchUploadJob(jobId, transferId, fileSizeBytes = 0) {
+  const maxPolls = uploadJobPollBudget(fileSizeBytes);
+  let consecutiveApiErrors = 0;
+  for (let poll = 0; poll < maxPolls; poll++) {
+    const delayMs =
+      poll < 8 ? UPLOAD_JOB_POLL_QUICK_MS : poll < 40 ? UPLOAD_JOB_POLL_MEDIUM_MS : UPLOAD_JOB_POLL_SLOW_MS;
+    await delay(delayMs);
+    let status;
+    try {
+      status = await api(`/files/upload/jobs/${encodeURIComponent(jobId)}`);
+      consecutiveApiErrors = 0;
+    } catch {
+      consecutiveApiErrors++;
+      if (consecutiveApiErrors >= 18) {
+        updateTransfer(transferId, {
+          status: t("uploadFailed"),
+          error: true,
+          speed: 0,
+          cancelable: false,
+        });
+        toast(`${t("uploadFailed")}: poll job`);
+        await loadQueue().catch(() => undefined);
+        return "pollFailed";
+      }
+      poll--;
+      continue;
+    }
     if (status.state === "completed") {
       if (status.result?.skippedDuplicate) {
         const reason = status.result.skippedDuplicateReason || t("uploadFailed");
@@ -3335,6 +3505,13 @@ async function watchUploadJob(jobId, transferId) {
       return "failed";
     }
   }
+  updateTransfer(transferId, {
+    status: t("uploadJobTimedOut"),
+    error: true,
+    speed: 0,
+    cancelable: false,
+  });
+  toast(t("uploadJobTimedOutToast"));
   await loadQueue().catch(() => undefined);
   return "timeout";
 }
@@ -3472,8 +3649,13 @@ async function showFileInfo(fileId) {
     api(`/files/${fileId}`),
     api(`/files/${fileId}/tags`),
   ]);
-  showAdminOutput({ meta, tags });
-  setView("admin");
+  const payload = { meta, tags };
+  if (accountIsAdmin()) {
+    showAdminOutput(payload);
+    setView("admin");
+    return;
+  }
+  await openReadOnlyInfoModal(t("info"), JSON.stringify(payload, null, 2));
 }
 
 async function downloadFolderZip(folderId = state.folderId) {
@@ -3887,15 +4069,15 @@ async function init() {
     return;
   }
   restoreNavigationState();
-  applyLanguage();
   persistAuthCookie();
   if (state.authToken && !localStorage.getItem(AUTH_STORAGE_KEY)) {
     localStorage.setItem(AUTH_STORAGE_KEY, state.authToken);
   }
   wireEvents();
-  setView(state.view, { persist: false, load: false });
   try {
     await loadAppConfig();
+    applyLanguage();
+    setView(state.view, { persist: false, load: false });
     await restoreUploadTransfers();
     void processUploadQueue().catch(showError);
     await Promise.all([loadQuota(), loadDrive()]);
