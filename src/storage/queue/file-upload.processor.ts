@@ -3,6 +3,7 @@ import { Logger } from '@nestjs/common';
 import { Job, UnrecoverableError } from 'bullmq';
 import { stat, unlink } from 'fs/promises';
 import { StoredFile } from '../domain/entities/stored-file.entity';
+import type { StorageTenant } from '../domain/storage-tenant';
 import { TelegramService } from '../telegram/telegram.service';
 import { StorageService } from '../storage.service';
 import { EnvKey } from '../../common/env-keys';
@@ -14,6 +15,7 @@ import {
 } from './file-upload.constants';
 
 export interface FileUploadJobData {
+  tenant: StorageTenant;
   tempPath: string;
   folderId: string | undefined;
   /** Tên file sau xử lý trùng (reject/overwrite/suffix) trước khi enqueue */
@@ -42,10 +44,12 @@ export class FileUploadProcessor extends WorkerHost {
   }
 
   async process(job: Job<FileUploadJobData>): Promise<StoredFile> {
-    const { tempPath, folderId, finalFileName, mimeType, allowDuplicateContent } = job.data;
+    const { tenant, tempPath, folderId, finalFileName, mimeType, allowDuplicateContent } =
+      job.data;
     const fileStat = await stat(tempPath);
-    const folderResolved = this.storage.uploadTargetFolderId(folderId);
+    const folderResolved = this.storage.uploadTargetFolderId(tenant, folderId);
     const saved = await this.persistWithPermanentErrorCheck(
+      tenant,
       folderResolved,
       finalFileName,
       mimeType,
@@ -60,7 +64,8 @@ export class FileUploadProcessor extends WorkerHost {
   }
 
   private async persistWithPermanentErrorCheck(
-    folderId: string,
+    tenant: StorageTenant,
+    folderResolved: string,
     finalFileName: string,
     mimeType: string,
     tempPath: string,
@@ -69,7 +74,8 @@ export class FileUploadProcessor extends WorkerHost {
   ): Promise<StoredFile> {
     try {
       return await this.storage.persistUploadedDocumentFromPath(
-        folderId,
+        tenant,
+        folderResolved,
         finalFileName,
         mimeType,
         tempPath,
@@ -80,19 +86,24 @@ export class FileUploadProcessor extends WorkerHost {
       const message = err instanceof Error ? err.message : String(err);
       if (message.includes('401: Unauthorized')) {
         throw new UnrecoverableError(
-          'Telegram Bot token không hợp lệ hoặc đã bị revoke (401 Unauthorized). Kiểm tra TELEGRAM_BOT_TOKEN trong .env rồi restart container.',
+          'Telegram Bot token không hợp lệ hoặc đã bị revoke (401 Unauthorized). Cập nhật bot token trên tài khoản admin đầu tiên (hoặc token/chat của user nếu không dùng chế độ chung).',
         );
       }
       if (
         message.includes(StorageExceptionMessage.FILE_DUPLICATE_NAME) ||
         message.includes('Duplicate entry')
       ) {
-        const suffixName = await this.storage.allocateFileSuffixName(folderId, finalFileName);
+        const suffixName = await this.storage.allocateFileSuffixName(
+          tenant,
+          folderResolved,
+          finalFileName,
+        );
         this.log.log(
-          `Upload job đổi tên file trùng: ${finalFileName} -> ${suffixName} trong folder ${folderId}`,
+          `Upload job đổi tên file trùng: ${finalFileName} -> ${suffixName} trong folder ${folderResolved}`,
         );
         return this.storage.persistUploadedDocumentFromPath(
-          folderId,
+          tenant,
+          folderResolved,
           suffixName,
           mimeType,
           tempPath,

@@ -19,8 +19,6 @@ import {
   UseInterceptors,
   ValidationPipe,
 } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
-import { FileInterceptor } from '@nestjs/platform-express';
 import { unlink } from 'fs/promises';
 import {
   ApiAcceptedResponse,
@@ -38,12 +36,14 @@ import {
   ApiTags,
 } from '@nestjs/swagger';
 import { validate as isUuid } from 'uuid';
+import type { Account } from '../../accounts/account.entity';
+import { CurrentAccount } from '../../accounts/current-account.decorator';
 import { Queue } from 'bullmq';
 import { Response } from 'express';
 import { Readable } from 'stream';
 import { ApiExceptionMessage } from '../../common/api-messages';
 import { API_V1_PREFIX } from '../../common/api-route';
-import { ROOT_FOLDER_ALIAS, ROOT_FOLDER_ID } from '../domain/constants';
+import { ROOT_FOLDER_ALIAS } from '../domain/constants';
 import { parseDuplicateNamePolicy } from '../domain/duplicate-name-policy';
 import { CreateShareDownloadDto } from '../domain/dto/create-share-download.dto';
 import { DuplicatePolicyQueryDto } from '../domain/dto/duplicate-policy-query.dto';
@@ -58,10 +58,7 @@ import {
   HttpHeader,
   MimeType,
 } from '../../common/http.constants';
-import {
-  telegramDownloadMaxBytes,
-  UploadDefaults,
-} from '../../common/upload.defaults';
+import { RuntimeConfigService } from '../../settings/runtime-config.service';
 import {
   FileMetaBatchRequestDto,
   FileMetaBatchResponseDto,
@@ -77,7 +74,7 @@ import { UploadJobQueuedDto } from '../domain/dto/upload-job-queued.dto';
 import { UploadJobStatusDto } from '../domain/dto/upload-job-status.dto';
 import { Folder } from '../domain/entities/folder.entity';
 import { StoredFile } from '../domain/entities/stored-file.entity';
-import { asyncUploadDiskStorage } from '../multer-async-disk.storage';
+import { accountLimitedFileInterceptor } from '../interceptors/account-limited-file.interceptor';
 import {
   BullMqJobState,
   FILE_UPLOAD_JOB_NAME,
@@ -94,16 +91,21 @@ import {
   SharedFilesQuery,
   SharedFilesRoutePath,
 } from '../storage-http.constants';
+import { telegramPublicMessageUrl } from '../telegram.constants';
 
 @ApiTags('files')
 @Controller(`${API_V1_PREFIX}/files`)
 export class FileController {
   constructor(
     private readonly storage: StorageService,
-    private readonly config: ConfigService,
+    private readonly runtime: RuntimeConfigService,
     private readonly shareDownloadToken: ShareDownloadTokenService,
     @InjectQueue(FILE_UPLOAD_QUEUE) private readonly uploadQueue: Queue<FileUploadJobData>,
   ) {}
+
+  private tenant(acc: Account) {
+    return this.storage.storageTenantFromAccountEntity(acc);
+  }
 
   @Get(FileRoutePath.QUOTA)
   @ApiOperation({
@@ -111,23 +113,29 @@ export class FileController {
     description: 'Thống kê file active, file trong thùng rác và dung lượng theo MIME type.',
   })
   @ApiOkResponse({ type: StorageQuotaResponseDto })
-  async quota(): Promise<StorageQuotaResponseDto> {
-    return this.storage.getStorageQuotaStats();
+  async quota(@CurrentAccount() account: Account): Promise<StorageQuotaResponseDto> {
+    return this.storage.getStorageQuotaStats(this.tenant(account));
   }
 
   @Get(FileRoutePath.TRASH)
   @ApiOperation({ summary: 'Danh sách file và folder trong thùng rác' })
   @ApiQuery({ name: 'limit', required: false, schema: { minimum: 1, maximum: 200 } })
   @ApiOkResponse({ type: TrashListResponseDto })
-  async trash(@Query('limit') limit?: string): Promise<TrashListResponseDto> {
+  async trash(
+    @CurrentAccount() account: Account,
+    @Query('limit') limit?: string,
+  ): Promise<TrashListResponseDto> {
     const trashLimit = limit ? Number(limit) : 100;
+    const t = this.tenant(account);
     const [folders, items] = await Promise.all([
-      this.storage.listTrashedFolders(trashLimit),
-      this.storage.listTrashedFiles(trashLimit),
+      this.storage.listTrashedFolders(t, trashLimit),
+      this.storage.listTrashedFiles(t, trashLimit),
     ]);
     return {
       folders: folders.map((f) => FileController.toTrashedFolder(f)),
-      items: items.map((f) => FileController.toTrashedFile(f)),
+      items: items.map((f) =>
+        FileController.toTrashedFile(f, this.runtime.telegramDownloadMaxBytes(), t.telegramStorageChatId),
+      ),
     };
   }
 
@@ -137,13 +145,17 @@ export class FileController {
   @ApiOkResponse({ type: FolderContentsResponseDto })
   @ApiNotFoundResponse({ description: 'Không tìm thấy folder trong thùng rác' })
   async trashFolderContents(
+    @CurrentAccount() account: Account,
     @Param('id', ParseUUIDPipe) id: string,
   ): Promise<FolderContentsResponseDto> {
-    const contents = await this.storage.listTrashFolderContents(id);
+    const t = this.tenant(account);
+    const contents = await this.storage.listTrashFolderContents(t, id);
     return {
       folderId: contents.folderId,
       folders: contents.folders.map((folder) => FileController.toFolderForTrashView(folder)),
-      files: contents.files.map((file) => FileController.toSummary(file)),
+      files: contents.files.map((file) =>
+        FileController.toSummary(file, this.runtime.telegramDownloadMaxBytes(), t.telegramStorageChatId),
+      ),
     };
   }
 
@@ -151,16 +163,19 @@ export class FileController {
   @HttpCode(HttpStatus.NO_CONTENT)
   @ApiOperation({ summary: 'Xóa sạch thùng rác' })
   @ApiNoContentResponse()
-  async emptyTrash() {
-    await this.storage.emptyTrash();
+  async emptyTrash(@CurrentAccount() account: Account) {
+    await this.storage.emptyTrash(this.tenant(account));
   }
 
   @Post(`${FileRoutePath.TRASH}/folders/:id/restore`)
   @ApiOperation({ summary: 'Khôi phục folder từ thùng rác' })
   @ApiParam({ name: 'id', format: 'uuid' })
   @ApiOkResponse({ type: TrashedFolderDto })
-  async restoreFolderFromTrash(@Param('id', ParseUUIDPipe) id: string): Promise<TrashedFolderDto> {
-    const restored = await this.storage.restoreFolder(id);
+  async restoreFolderFromTrash(
+    @CurrentAccount() account: Account,
+    @Param('id', ParseUUIDPipe) id: string,
+  ): Promise<TrashedFolderDto> {
+    const restored = await this.storage.restoreFolder(this.tenant(account), id);
     return FileController.toTrashedFolder(restored);
   }
 
@@ -169,8 +184,11 @@ export class FileController {
   @ApiOperation({ summary: 'Xóa vĩnh viễn folder trong thùng rác' })
   @ApiParam({ name: 'id', format: 'uuid' })
   @ApiNoContentResponse()
-  async permanentlyRemoveFolderFromTrash(@Param('id', ParseUUIDPipe) id: string) {
-    await this.storage.permanentlyDeleteFolder(id);
+  async permanentlyRemoveFolderFromTrash(
+    @CurrentAccount() account: Account,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    await this.storage.permanentlyDeleteFolder(this.tenant(account), id);
   }
 
   @Post(`${FileRoutePath.TRASH}/:id/restore`)
@@ -185,12 +203,14 @@ export class FileController {
   @ApiOkResponse({ type: StoredFileSummaryDto })
   @ApiNotFoundResponse({ description: 'Không tìm thấy file trong thùng rác' })
   async restoreFromTrash(
+    @CurrentAccount() account: Account,
     @Param('id', ParseUUIDPipe) id: string,
     @Query() dup: DuplicatePolicyQueryDto,
   ): Promise<StoredFileSummaryDto> {
     const policy = parseDuplicateNamePolicy(dup.duplicatePolicy ?? 'suffix', dup.overwrite);
-    const restored = await this.storage.restoreFile(id, policy);
-    return FileController.toSummary(restored);
+    const t = this.tenant(account);
+    const restored = await this.storage.restoreFile(t, id, policy);
+    return FileController.toSummary(restored, this.runtime.telegramDownloadMaxBytes(), t.telegramStorageChatId);
   }
 
   @Delete(`${FileRoutePath.TRASH}/:id`)
@@ -199,8 +219,11 @@ export class FileController {
   @ApiParam({ name: 'id', format: 'uuid' })
   @ApiNoContentResponse()
   @ApiNotFoundResponse({ description: 'Không tìm thấy file trong thùng rác' })
-  async permanentlyRemoveFromTrash(@Param('id', ParseUUIDPipe) id: string) {
-    await this.storage.permanentlyDeleteFile(id);
+  async permanentlyRemoveFromTrash(
+    @CurrentAccount() account: Account,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    await this.storage.permanentlyDeleteFile(this.tenant(account), id);
   }
 
   @Get(`${FileRoutePath.TRASH}/:id/download`)
@@ -244,15 +267,17 @@ export class FileController {
   @ApiNotFoundResponse({ description: 'File không có thumbnail' })
   @ApiBadGatewayResponse({ description: 'Không tải được từ Telegram' })
   async thumbnailFromTrash(
+    @CurrentAccount() account: Account,
     @Param('id', ParseUUIDPipe) id: string,
     @Res({ passthrough: false }) res: Response,
   ) {
-    const f = await this.storage.getFileForRead(id, true);
+    const t = this.tenant(account);
+    const f = await this.storage.getFileForRead(t, id, true);
     const thumbId = f.thumbnailTelegramFileId;
     if (!thumbId) {
       throw new NotFoundException(ApiExceptionMessage.FILE_NO_THUMBNAIL);
     }
-    const r = await this.storage.fetchTelegramFileResponse(thumbId).catch(() => {
+    const r = await this.storage.fetchTelegramFileResponse(t, thumbId).catch(() => {
       throw new BadGatewayException(ApiExceptionMessage.TELEGRAM_THUMB_DOWNLOAD_FAILED);
     });
     res.setHeader(HttpHeader.CONTENT_TYPE, MimeType.JPEG);
@@ -289,22 +314,9 @@ export class FileController {
   @ApiConflictResponse({ description: 'Trùng tên khi duplicatePolicy=reject' })
   @ApiQuery({ name: 'duplicatePolicy', required: false, enum: ['reject', 'overwrite', 'suffix'] })
   @ApiQuery({ name: 'overwrite', required: false, description: 'true = như duplicatePolicy=overwrite' })
-  @UseInterceptors(
-    FileInterceptor(FileMultipart.FIELD_FILE, {
-      storage: asyncUploadDiskStorage,
-      limits: {
-        fileSize:
-          Number(
-            process.env[EnvKey.MINIO_LIMIT_GB] ??
-              String(UploadDefaults.MINIO_LIMIT_GB_FALLBACK),
-          ) *
-          1024 *
-          1024 *
-          1024,
-      },
-    }),
-  )
+  @UseInterceptors(accountLimitedFileInterceptor(FileMultipart.FIELD_FILE))
   async upload(
+    @CurrentAccount() account: Account,
     @UploadedFile() file: Express.Multer.File | undefined,
     @Query() dup: DuplicatePolicyQueryDto,
     @Body(FileMultipart.BODY_FOLDER_ID) folderId?: string,
@@ -313,13 +325,16 @@ export class FileController {
       throw new BadRequestException(ApiExceptionMessage.MISSING_MULTIPART_FILE);
     }
     const policy = parseDuplicateNamePolicy(dup.duplicatePolicy, dup.overwrite);
+    const t = this.tenant(account);
     try {
       const { folderId: targetFolderId, effectiveName } = await this.storage.resolveUploadTarget(
+        t,
         folderId,
         file.originalname,
         policy,
       );
       return await this.storage.persistUploadedDocumentFromPath(
+        t,
         targetFolderId,
         effectiveName,
         file.mimetype,
@@ -360,22 +375,9 @@ export class FileController {
   })
   @ApiQuery({ name: 'duplicatePolicy', required: false, enum: ['reject', 'overwrite', 'suffix'] })
   @ApiQuery({ name: 'overwrite', required: false })
-  @UseInterceptors(
-    FileInterceptor(FileMultipart.FIELD_FILE, {
-      storage: asyncUploadDiskStorage,
-      limits: {
-        fileSize:
-          Number(
-            process.env[EnvKey.MINIO_LIMIT_GB] ??
-              String(UploadDefaults.MINIO_LIMIT_GB_FALLBACK),
-          ) *
-          1024 *
-          1024 *
-          1024,
-      },
-    }),
-  )
+  @UseInterceptors(accountLimitedFileInterceptor(FileMultipart.FIELD_FILE))
   async uploadAsync(
+    @CurrentAccount() account: Account,
     @UploadedFile() file: Express.Multer.File | undefined,
     @Query() dup: DuplicatePolicyQueryDto,
     @Query('allowDuplicateContent') allowDuplicateContent?: string,
@@ -385,13 +387,11 @@ export class FileController {
       throw new BadRequestException(ApiExceptionMessage.MISSING_MULTIPART_FILE);
     }
     const policy = parseDuplicateNamePolicy(dup.duplicatePolicy, dup.overwrite);
-    const { finalFileName } = await this.storage.prepareAsyncUpload(
-      folderId,
-      file.originalname,
-      policy,
-    );
+    const t = this.tenant(account);
+    const { finalFileName } = await this.storage.prepareAsyncUpload(t, folderId, file.originalname, policy);
 
     const job = await this.uploadQueue.add(FILE_UPLOAD_JOB_NAME, {
+      tenant: t,
       tempPath: file.path,
       folderId,
       finalFileName,
@@ -429,7 +429,13 @@ export class FileController {
     };
 
     if (state === BullMqJobState.COMPLETED && job.returnvalue != null) {
-      dto.result = FileController.toSummary(job.returnvalue as StoredFile);
+      const tenantChat =
+        (job.data as FileUploadJobData | undefined)?.tenant?.telegramStorageChatId ?? '';
+      dto.result = FileController.toSummary(
+        job.returnvalue as StoredFile,
+        this.runtime.telegramDownloadMaxBytes(),
+        tenantChat,
+      );
     }
     if (state === BullMqJobState.FAILED) {
       dto.failedReason = job.failedReason ?? undefined;
@@ -445,8 +451,12 @@ export class FileController {
       'substring hoặc prefix; có thể lọc `folderId` (UUID hoặc root). Giới hạn `limit` (mặc định 50).',
   })
   @ApiOkResponse({ type: FileSearchResponseDto })
-  async search(@Query() query: FileSearchQueryDto): Promise<FileSearchResponseDto> {
-    const items = await this.storage.searchFiles({
+  async search(
+    @CurrentAccount() account: Account,
+    @Query() query: FileSearchQueryDto,
+  ): Promise<FileSearchResponseDto> {
+    const t = this.tenant(account);
+    const items = await this.storage.searchFiles(t, {
       q: query.q,
       folderId: query.folderId,
       mode: query.mode ?? 'substring',
@@ -461,7 +471,9 @@ export class FileController {
       tags: query.tags,
     });
     return {
-      items: items.map((f) => FileController.toSummary(f)),
+      items: items.map((f) =>
+        FileController.toSummary(f, this.runtime.telegramDownloadMaxBytes(), t.telegramStorageChatId),
+      ),
     };
   }
 
@@ -473,9 +485,10 @@ export class FileController {
   @ApiBody({ type: FileMetaBatchRequestDto })
   @ApiOkResponse({ type: FileMetaBatchResponseDto })
   async metaBatch(
+    @CurrentAccount() account: Account,
     @Body(ValidationPipe) body: FileMetaBatchRequestDto,
   ): Promise<FileMetaBatchResponseDto> {
-    const items = await this.storage.getFilesMetaBatch(body.ids);
+    const items = await this.storage.getFilesMetaBatch(this.tenant(account), body.ids);
     return { items };
   }
 
@@ -492,6 +505,7 @@ export class FileController {
   @ApiQuery({ name: 'duplicatePolicy', required: false, enum: ['reject', 'overwrite', 'suffix'] })
   @ApiQuery({ name: 'overwrite', required: false })
   async patchFile(
+    @CurrentAccount() account: Account,
     @Param('id', ParseUUIDPipe) id: string,
     @Body(ValidationPipe) body: PatchFileDto,
     @Query() dup: DuplicatePolicyQueryDto,
@@ -502,7 +516,7 @@ export class FileController {
     let resolvedFolder: string | undefined;
     if (body.folderId !== undefined) {
       if (body.folderId === ROOT_FOLDER_ALIAS) {
-        resolvedFolder = ROOT_FOLDER_ID;
+        resolvedFolder = ROOT_FOLDER_ALIAS;
       } else if (!isUuid(body.folderId)) {
         throw new BadRequestException(ApiExceptionMessage.INVALID_PATCH_FOLDER_ID);
       } else {
@@ -510,22 +524,27 @@ export class FileController {
       }
     }
     const policy = parseDuplicateNamePolicy(dup.duplicatePolicy, dup.overwrite);
+    const t = this.tenant(account);
     const saved = await this.storage.patchFile(
+      t,
       id,
       { name: body.name, folderId: resolvedFolder },
       policy,
     );
-    return FileController.toSummary(saved);
+    return FileController.toSummary(saved, this.runtime.telegramDownloadMaxBytes(), t.telegramStorageChatId);
   }
 
   @Get(':id/tags')
   @ApiOperation({ summary: 'Danh sách tag của file' })
   @ApiParam({ name: 'id', format: 'uuid' })
   @ApiOkResponse({ type: FileTagsResponseDto })
-  async getTags(@Param('id', ParseUUIDPipe) id: string): Promise<FileTagsResponseDto> {
+  async getTags(
+    @CurrentAccount() account: Account,
+    @Param('id', ParseUUIDPipe) id: string,
+  ): Promise<FileTagsResponseDto> {
     return {
       fileId: id,
-      tags: await this.storage.getFileTags(id),
+      tags: await this.storage.getFileTags(this.tenant(account), id),
     };
   }
 
@@ -535,10 +554,11 @@ export class FileController {
   @ApiBody({ type: UpdateFileTagsDto })
   @ApiOkResponse({ type: FileTagsResponseDto })
   async updateTags(
+    @CurrentAccount() account: Account,
     @Param('id', ParseUUIDPipe) id: string,
     @Body(ValidationPipe) body: UpdateFileTagsDto,
   ): Promise<FileTagsResponseDto> {
-    const saved = await this.storage.setFileTags(id, body.tags);
+    const saved = await this.storage.setFileTags(this.tenant(account), id, body.tags);
     return {
       fileId: saved.id,
       tags: StorageService.tagsToNames(saved),
@@ -549,7 +569,7 @@ export class FileController {
   @ApiOperation({
     summary: 'Tạo link tải/xem công khai (token có TTL)',
     description:
-      'Cần Basic Auth. Người nhận chỉ cần URL có `token` — không cần Basic Auth. Đặt `PUBLIC_APP_URL` (không dấu `/` cuối) để có `downloadUrl` / `viewUrl` đầy đủ.',
+      'Cần Basic Auth. Người nhận chỉ cần URL có `token` — không cần Basic Auth. Cấu hình `PUBLIC_APP_URL` trong Cài đặt admin (không dấu `/` cuối) để có `downloadUrl` / `viewUrl` đầy đủ.',
   })
   @ApiBody({
     type: CreateShareDownloadDto,
@@ -560,19 +580,17 @@ export class FileController {
   @ApiOkResponse({ type: ShareDownloadLinkResponseDto })
   @ApiNotFoundResponse({ description: 'Không tìm thấy file' })
   async createShareDownload(
+    @CurrentAccount() account: Account,
     @Param('id', ParseUUIDPipe) id: string,
     @Body(ValidationPipe) body: CreateShareDownloadDto,
   ): Promise<ShareDownloadLinkResponseDto> {
-    await this.storage.getFile(id);
+    await this.storage.getFile(this.tenant(account), id);
     const ttl = body.ttlSeconds ?? 86400;
     const { token, expiresAt } = this.shareDownloadToken.create(id, ttl);
     const base = `/${API_V1_PREFIX}/${SharedFilesRoutePath.BASE}`;
     const downloadPath = `${base}/${SharedFilesRoutePath.DOWNLOAD}?${SharedFilesQuery.TOKEN}=${encodeURIComponent(token)}`;
     const viewPath = `${base}/${SharedFilesRoutePath.VIEW}?${SharedFilesQuery.TOKEN}=${encodeURIComponent(token)}`;
-    const publicBase = this.config
-      .get<string>(EnvKey.PUBLIC_APP_URL)
-      ?.trim()
-      .replace(/\/+$/, '');
+    const publicBase = this.runtime.effectiveTrimmed(EnvKey.PUBLIC_APP_URL)?.replace(/\/+$/, '');
     const dto: ShareDownloadLinkResponseDto = {
       token,
       expiresAt,
@@ -598,16 +616,16 @@ export class FileController {
   @ApiParam({ name: 'id', format: 'uuid' })
   @ApiNoContentResponse()
   @ApiNotFoundResponse({ description: 'Không tìm thấy file' })
-  async remove(@Param('id', ParseUUIDPipe) id: string) {
-    await this.storage.deleteFile(id);
+  async remove(@CurrentAccount() account: Account, @Param('id', ParseUUIDPipe) id: string) {
+    await this.storage.deleteFile(this.tenant(account), id);
   }
 
   @Get(':id')
   @ApiOperation({ summary: 'Metadata file (JSON)' })
   @ApiParam({ name: 'id', format: 'uuid' })
   @ApiOkResponse({ type: FileMetaResponseDto })
-  async meta(@Param('id', ParseUUIDPipe) id: string) {
-    const f = await this.storage.getFile(id);
+  async meta(@CurrentAccount() account: Account, @Param('id', ParseUUIDPipe) id: string) {
+    const f = await this.storage.getFile(this.tenant(account), id);
     return {
       id: f.id,
       name: f.name,
@@ -617,8 +635,12 @@ export class FileController {
       createdAt: f.createdAt,
       hasThumbnail: !!f.thumbnailTelegramFileId,
       tags: StorageService.tagsToNames(f),
-      canDirectDownload: FileController.canDirectDownload(f),
-      telegramMessageUrl: FileController.telegramMessageUrl(f.telegramMessageId),
+      canDirectDownload:
+        !!f.s3ObjectKey || (!!f.telegramFileId && f.size <= this.runtime.telegramDownloadMaxBytes()),
+      telegramMessageUrl: telegramPublicMessageUrl(
+        f.telegramMessageId,
+        this.tenant(account).telegramStorageChatId,
+      ),
     };
   }
 
@@ -662,15 +684,17 @@ export class FileController {
   @ApiNotFoundResponse({ description: 'File không có thumbnail' })
   @ApiBadGatewayResponse({ description: 'Không tải được từ Telegram' })
   async thumbnail(
+    @CurrentAccount() account: Account,
     @Param('id', ParseUUIDPipe) id: string,
     @Res({ passthrough: false }) res: Response,
   ) {
-    const f = await this.storage.getFile(id);
+    const t = this.tenant(account);
+    const f = await this.storage.getFile(t, id);
     const thumbId = f.thumbnailTelegramFileId;
     if (!thumbId) {
       throw new NotFoundException(ApiExceptionMessage.FILE_NO_THUMBNAIL);
     }
-    const r = await this.storage.fetchTelegramFileResponse(thumbId).catch(() => {
+    const r = await this.storage.fetchTelegramFileResponse(t, thumbId).catch(() => {
       throw new BadGatewayException(ApiExceptionMessage.TELEGRAM_THUMB_DOWNLOAD_FAILED);
     });
     res.setHeader(HttpHeader.CONTENT_TYPE, MimeType.JPEG);
@@ -678,7 +702,11 @@ export class FileController {
     Readable.fromWeb(r.body as import('stream/web').ReadableStream).pipe(res);
   }
 
-  private static toSummary(f: StoredFile): StoredFileSummaryDto {
+  private static toSummary(
+    f: StoredFile,
+    telegramMaxBytes: number,
+    telegramStorageChatId: string,
+  ): StoredFileSummaryDto {
     const skippedDuplicate = f as StoredFile & {
       skippedDuplicate?: boolean;
       skippedDuplicateReason?: string;
@@ -697,18 +725,23 @@ export class FileController {
       thumbnailTelegramFileId: f.thumbnailTelegramFileId,
       telegramMessageId: f.telegramMessageId,
       tags: StorageService.tagsToNames(f),
-      canDirectDownload: FileController.canDirectDownload(f),
-      telegramMessageUrl: FileController.telegramMessageUrl(f.telegramMessageId),
+      canDirectDownload:
+        !!f.s3ObjectKey || (!!f.telegramFileId && f.size <= telegramMaxBytes),
+      telegramMessageUrl: telegramPublicMessageUrl(f.telegramMessageId, telegramStorageChatId),
       skippedDuplicate: skippedDuplicate.skippedDuplicate,
       skippedDuplicateReason: skippedDuplicate.skippedDuplicateReason,
       createdAt: f.createdAt instanceof Date ? f.createdAt : new Date(f.createdAt as string),
     };
   }
 
-  private static toTrashedFile(f: StoredFile): TrashedFileDto {
+  private static toTrashedFile(
+    f: StoredFile,
+    telegramMaxBytes: number,
+    telegramStorageChatId: string,
+  ): TrashedFileDto {
     const deletedAt = f.deletedAt instanceof Date ? f.deletedAt : new Date(f.deletedAt ?? Date.now());
     return {
-      ...FileController.toSummary(f),
+      ...FileController.toSummary(f, telegramMaxBytes, telegramStorageChatId),
       deletedAt,
       deletedOriginalFolderId: f.deletedOriginalFolderId,
       deletedOriginalName: f.deletedOriginalName,
@@ -742,26 +775,5 @@ export class FileController {
       dto.deletedOriginalName = folder.deletedOriginalName;
     }
     return dto;
-  }
-
-  private static canDirectDownload(f: StoredFile): boolean {
-    return !!f.s3ObjectKey || (!!f.telegramFileId && f.size <= telegramDownloadMaxBytes());
-  }
-
-  private static telegramMessageUrl(messageId: string | null | undefined): string | undefined {
-    if (!messageId) {
-      return undefined;
-    }
-    const chat = process.env[EnvKey.TELEGRAM_STORAGE_CHAT_ID]?.trim();
-    if (!chat) {
-      return undefined;
-    }
-    if (chat.startsWith('@')) {
-      return `https://t.me/${chat.slice(1)}/${messageId}`;
-    }
-    if (chat.startsWith('-100')) {
-      return `https://t.me/c/${chat.slice(4)}/${messageId}`;
-    }
-    return undefined;
   }
 }

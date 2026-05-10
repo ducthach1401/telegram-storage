@@ -4,12 +4,11 @@ import {
   Injectable,
   UnauthorizedException,
 } from "@nestjs/common";
-import { ConfigService } from "@nestjs/config";
 import { Reflector } from "@nestjs/core";
-import { timingSafeEqual } from "crypto";
 import type { Request, Response } from "express";
 import { ApiExceptionMessage } from "../common/api-messages";
-import { EnvKey } from "../common/env-keys";
+import { AccountService } from "../accounts/account.service";
+import { verifyPassword } from "../accounts/password-hash.util";
 import {
   BasicAuthWwwAuthenticateValue,
   BufferEncoding,
@@ -21,16 +20,16 @@ import {
 import { IS_PUBLIC_KEY } from "./public.decorator";
 
 /**
- * Basic Auth luôn bật — user/password lấy từ EnvKey.API_BASIC_AUTH_* (bootstrap kiểm tra không rỗng).
+ * Basic Auth — kiểm tra username/password với bảng `accounts` (bootstrap admin tạo từ env khi DB trống).
  */
 @Injectable()
 export class BasicAuthGuard implements CanActivate {
   constructor(
-    private readonly config: ConfigService,
     private readonly reflector: Reflector,
+    private readonly accounts: AccountService,
   ) {}
 
-  canActivate(context: ExecutionContext): boolean {
+  async canActivate(context: ExecutionContext): Promise<boolean> {
     const isPublic = this.reflector.getAllAndOverride<boolean>(IS_PUBLIC_KEY, [
       context.getHandler(),
       context.getClass(),
@@ -45,13 +44,6 @@ export class BasicAuthGuard implements CanActivate {
     if (req.method === HttpMethod.OPTIONS) {
       return true;
     }
-
-    const password = (
-      this.config.get<string>(EnvKey.API_BASIC_AUTH_PASSWORD) ?? ""
-    ).trim();
-    const expectedUser = (
-      this.config.get<string>(EnvKey.API_BASIC_AUTH_USER) ?? ""
-    ).trim();
 
     const authHeader =
       req.headers[HttpIncomingHeader.AUTHORIZATION] ??
@@ -75,13 +67,12 @@ export class BasicAuthGuard implements CanActivate {
     const user = colon >= 0 ? decoded.slice(0, colon) : decoded;
     const pass = colon >= 0 ? decoded.slice(colon + 1) : "";
 
-    if (
-      !this.safeEqualUtf8(user, expectedUser) ||
-      !this.safeEqualUtf8(pass, password)
-    ) {
+    const account = await this.accounts.findByUsername(user);
+    if (!account || !verifyPassword(pass, account.passwordHash)) {
       this.unauthorized(req, res);
     }
 
+    req.account = account;
     return true;
   }
 
@@ -104,12 +95,4 @@ export class BasicAuthGuard implements CanActivate {
     return `${HttpAuthScheme.BASIC_PREFIX}${decodeURIComponent(raw)}`;
   }
 
-  private safeEqualUtf8(a: string, b: string): boolean {
-    const ba = Buffer.from(a, BufferEncoding.UTF8);
-    const bb = Buffer.from(b, BufferEncoding.UTF8);
-    if (ba.length !== bb.length) {
-      return false;
-    }
-    return timingSafeEqual(ba, bb);
-  }
 }

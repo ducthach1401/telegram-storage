@@ -5,7 +5,7 @@ export function setupSwagger(app: INestApplication): void {
   const builder = new DocumentBuilder()
     .setTitle("Telegram Storage API")
     .setDescription(
-      "Hầu hết endpoint cần **Basic Auth** (`Authorization: Basic …`). User/password trong `.env`: `API_BASIC_AUTH_USER`, `API_BASIC_AUTH_PASSWORD`. Nhóm **shared** (`GET …/shared/files/download|view?token=`) **không** cần Basic Auth — chỉ cần token hợp lệ từ `POST …/files/:id/share-download`.",
+      "Hầu hết endpoint cần **Basic Auth** (`Authorization: Basic …`) với user/password trong bảng `accounts` (lần chạy đầu không có admin: server tự tạo admin và log mật khẩu một lần). Đăng ký user tại `POST /api/v1/auth/register`. Nhóm **shared** (`GET …/shared/files/download|view?token=`) **không** cần Basic Auth — chỉ cần token hợp lệ từ `POST …/files/:id/share-download`.",
     )
     .setVersion("1.0")
     .addTag("app", "Thông tin service")
@@ -28,7 +28,7 @@ export function setupSwagger(app: INestApplication): void {
         type: "http",
         scheme: "basic",
         description:
-          "Biến môi trường: API_BASIC_AUTH_USER, API_BASIC_AUTH_PASSWORD",
+          "User/password lấy từ DB (`accounts`) hoặc đăng ký qua API.",
       },
       "basic-auth",
     );

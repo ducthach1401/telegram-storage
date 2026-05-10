@@ -1,5 +1,3 @@
-import { randomUUID } from 'crypto';
-import { mkdirSync } from 'fs';
 import {
   BadRequestException,
   Controller,
@@ -9,7 +7,6 @@ import {
   UploadedFile,
   UseInterceptors,
 } from '@nestjs/common';
-import { FileInterceptor } from '@nestjs/platform-express';
 import {
   ApiBadRequestResponse,
   ApiBody,
@@ -18,11 +15,8 @@ import {
   ApiOperation,
   ApiTags,
 } from '@nestjs/swagger';
-import { diskStorage } from 'multer';
 import { unlink } from 'fs/promises';
-import { join } from 'path';
 import { ApiExceptionMessage } from '../../common/api-messages';
-import { EnvKey } from '../../common/env-keys';
 import { API_V1_PREFIX } from '../../common/api-route';
 import { FileMultipart } from '../storage-http.constants';
 import { MysqlImportResponseDto } from '../domain/dto/mysql-import-response.dto';
@@ -30,6 +24,7 @@ import {
   AdminControllerPath,
   AdminMysqlSubRoute,
 } from './admin.routes';
+import { MysqlImportMulterInterceptor } from '../interceptors/mysql-import-file.interceptor';
 import { MysqlImportService } from './mysql-import.service';
 
 function dumpFilenameSuffix(original: string): string {
@@ -76,30 +71,7 @@ export class MysqlImportController {
   @ApiBadRequestResponse({
     description: 'Thiếu file / sai đuôi / mysql báo lỗi (stderr trong body)',
   })
-  @UseInterceptors(
-    FileInterceptor(FileMultipart.FIELD_FILE, {
-      limits: {
-        fileSize:
-          (Number(process.env[EnvKey.MYSQL_IMPORT_MAX_MB]) || 512) *
-          1024 *
-          1024,
-      },
-      storage: diskStorage({
-        destination: (_req, _file, cb) => {
-          const base =
-            process.env[EnvKey.UPLOAD_TMP_DIR]?.trim() ||
-            join(process.cwd(), 'tmp', 'uploads');
-          const dir = join(base, 'mysql-import');
-          mkdirSync(dir, { recursive: true });
-          cb(null, dir);
-        },
-        filename: (_req, file, cb) => {
-          const suf = dumpFilenameSuffix(file.originalname);
-          cb(null, `${randomUUID()}${suf}`);
-        },
-      }),
-    }),
-  )
+  @UseInterceptors(MysqlImportMulterInterceptor)
   async importDump(
     @UploadedFile() file: Express.Multer.File | undefined,
   ): Promise<MysqlImportResponseDto> {

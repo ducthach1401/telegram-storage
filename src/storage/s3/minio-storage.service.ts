@@ -57,12 +57,6 @@ export class MinioStorageService implements OnModuleInit {
     return this.bucket;
   }
 
-  limitBytes(): number {
-    const gb = Number(this.config.get<string>(EnvKey.MINIO_LIMIT_GB) ?? '50');
-    const safeGb = Number.isFinite(gb) && gb > 0 ? gb : 50;
-    return Math.floor(safeGb * 1024 * 1024 * 1024);
-  }
-
   async putFileFromPath(params: {
     objectKey: string;
     path: string;

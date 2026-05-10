@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="vi">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#1a73e8" />
+    <title>Đăng ký · Telegram Drive</title>
+    <link rel="icon" href="/logo.png" type="image/png" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body class="auth-page-body">
+    <div class="auth-page-stack">
+      <div class="auth-brand">
+        <img class="auth-brand-logo" src="/logo.png" alt="" width="44" height="44" />
+        <div>
+          <strong>Telegram Drive</strong>
+          <span>Tạo tài khoản — kênh chung hoặc bot/chat riêng</span>
+        </div>
+      </div>
+
+      <form class="modal auth-card" id="registerForm" autocomplete="on">
+        <div class="modal-head">
+          <h1 id="registerTitle">Đăng ký</h1>
+        </div>
+        <p class="modal-description" id="registerDescription">
+          <strong>Lần đầu cài đặt:</strong> tài khoản đăng ký đầu tiên là <strong>admin</strong> — có thể để trống Bot token / Chat ID và cấu hình sau trong Cài đặt. Các tài khoản sau là user (quota MinIO 0 trừ khi admin chỉnh).
+        </p>
+        <div id="registerAlert" class="auth-alert" hidden></div>
+
+        <label class="modal-field">
+          <span>Tài khoản</span>
+          <input id="regUser" name="username" type="text" autocomplete="username" required minlength="2" />
+        </label>
+        <label class="modal-field">
+          <span>Mật khẩu</span>
+          <input id="regPass" name="password" type="password" autocomplete="new-password" required minlength="6" />
+        </label>
+
+        <label class="modal-field modal-field-row">
+          <input id="regUsePlatform" name="usePlatformTelegramStorage" type="checkbox" />
+          <span>Dùng bot và kênh lưu của admin đầu tiên (chung cho nhiều tài khoản)</span>
+        </label>
+        <p class="field-hint">Admin đã cấu hình Telegram chung thì user mới có thể bật ô này. Lần đầu thường tắt và để trống token/chat, hoặc nhập bot/chat riêng.</p>
+
+        <div id="regTelegramCustomFields">
+          <label class="modal-field">
+            <span>Bot token</span>
+            <textarea id="regBotToken" name="telegramBotToken" spellcheck="false" placeholder="123456:ABC..."></textarea>
+          </label>
+          <p class="field-hint">Token từ BotFather — bot phải được thêm vào kênh/chat lưu file (quyền đăng tin).</p>
+
+          <label class="modal-field">
+            <span>Chat / kênh ID lưu file</span>
+            <input id="regChatId" name="telegramStorageChatId" type="text" spellcheck="false" placeholder="-1001234567890 hoặc chat id" />
+          </label>
+          <p class="field-hint">ID kênh hoặc nhóm nơi bot gửi file.</p>
+        </div>
+
+        <div class="modal-actions">
+          <button type="submit" class="primary-action auth-submit">Tạo tài khoản</button>
+        </div>
+      </form>
+
+      <p class="auth-foot" id="registerFootLogin">
+        Đã có tài khoản?
+        <a href="/login.html">Đăng nhập</a>
+      </p>
+      <p class="auth-foot">
+        <a href="/">← Về trang chủ</a>
+      </p>
+    </div>
+    <script src="/auth-pages.js"></script>
+  </body>
+</html>

@@ -1,18 +1,17 @@
 import { Injectable } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
-import { EnvKey } from '../../common/env-keys';
+import { AccountService } from '../../accounts/account.service';
 import { StorageService } from '../storage.service';
 
 @Injectable()
 export class TelegramSyncService {
   constructor(
-    private readonly config: ConfigService,
+    private readonly accounts: AccountService,
     private readonly storage: StorageService,
   ) {}
 
   /**
-   * Đồng bộ ngược: document trong tin/channel đã gửi vào TELEGRAM_STORAGE_CHAT_ID.
-   * Bỏ qua tin không có document hoặc đã có telegramMessageId trong DB.
+   * Đồng bộ ngược: khớp `telegram_storage_chat_id` trên account, hoặc khớp `TELEGRAM_STORAGE_CHAT_FOR_PUBLIC_ID`
+   * (Cài đặt server) → gán ingest cho admin đầu tiên.
    */
   async handleTelegramUpdate(update: Record<string, unknown>): Promise<void> {
     const msgRaw =
@@ -27,10 +26,9 @@ export class TelegramSyncService {
       return;
     }
 
-    const expected = this.config
-      .getOrThrow<string>(EnvKey.TELEGRAM_STORAGE_CHAT_ID)
-      .trim();
-    if (String(chat.id) !== expected) {
+    const chatIdStr = String(chat.id);
+    const account = await this.accounts.findByTelegramStorageChatId(chatIdStr);
+    if (!account) {
       return;
     }
 
@@ -52,7 +50,8 @@ export class TelegramSyncService {
       return;
     }
 
-    await this.storage.ingestInboundTelegramDocument({
+    const tenant = this.storage.storageTenantFromAccountEntity(account);
+    await this.storage.ingestInboundTelegramDocument(tenant, {
       messageId: msgRaw.message_id,
       document: {
         file_id: doc.file_id,

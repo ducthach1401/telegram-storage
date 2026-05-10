@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="vi">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#1a73e8" />
+    <title>Đăng nhập · Telegram Drive</title>
+    <link rel="icon" href="/logo.png" type="image/png" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body class="auth-page-body">
+    <div class="auth-page-stack">
+      <div class="auth-brand">
+        <img class="auth-brand-logo" src="/logo.png" alt="" width="44" height="44" />
+        <div>
+          <strong>Telegram Drive</strong>
+          <span id="loginBrandSubtitle">Đăng nhập để vào drive</span>
+        </div>
+      </div>
+
+      <article class="modal auth-card" id="setupFirstAdminCard" hidden>
+        <div class="modal-head">
+          <h1>Khởi tạo admin đầu tiên</h1>
+        </div>
+        <p class="modal-description">
+          Chưa có tài khoản nào trong hệ thống. Vui lòng tạo <strong>tài khoản admin đầu tiên</strong>; sau đó mới có thể đăng nhập hoặc mở đăng ký cho người dùng khác.
+        </p>
+        <div class="modal-actions">
+          <a class="primary-action auth-submit" href="/register.html" style="text-align: center; text-decoration: none"
+            >Đăng ký admin đầu tiên</a
+          >
+        </div>
+      </article>
+
+      <form class="modal auth-card" id="loginForm" autocomplete="on">
+        <div class="modal-head">
+          <h1>Đăng nhập</h1>
+        </div>
+        <p class="modal-description">Dùng tài khoản đã đăng ký hoặc do quản trị viên tạo.</p>
+        <div id="loginAlert" class="auth-alert" hidden></div>
+        <label class="modal-field">
+          <span>Tài khoản</span>
+          <input id="loginUser" name="username" type="text" autocomplete="username" required />
+        </label>
+        <label class="modal-field">
+          <span>Mật khẩu</span>
+          <input id="loginPass" name="password" type="password" autocomplete="current-password" required />
+        </label>
+        <div class="modal-actions">
+          <button type="submit" class="primary-action auth-submit">Đăng nhập</button>
+        </div>
+      </form>
+
+      <p class="auth-foot" id="loginFootRegister">
+        Chưa có tài khoản?
+        <a href="/register.html">Đăng ký</a>
+      </p>
+      <p class="auth-foot">
+        <a href="/">← Về trang chủ</a>
+      </p>
+    </div>
+    <script src="/auth-pages.js"></script>
+  </body>
+</html>

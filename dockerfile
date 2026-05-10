@@ -7,7 +7,7 @@ RUN npm ci --no-audit --no-fund
 COPY tsconfig*.json nest-cli.json ./
 COPY src ./src
 COPY public ./public
-RUN npm run build
+RUN rm -rf dist && npm run build && test -f dist/src/main.js
 
 FROM node:22-alpine AS production
 WORKDIR /app

@@ -2,8 +2,8 @@ import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { StoredFile } from '../domain/entities/stored-file.entity';
+import { telegramIsDocumentAccessible } from '../telegram/telegram-bot.operations';
 import { StorageService } from '../storage.service';
-import { TelegramService } from '../telegram/telegram.service';
 import { ReconcileRequestDto } from './dto/reconcile-request.dto';
 import { ReconcileResponseDto } from './dto/reconcile-response.dto';
 
@@ -16,7 +16,6 @@ export class ReconcileService {
   constructor(
     @InjectRepository(StoredFile)
     private readonly fileRepo: Repository<StoredFile>,
-    private readonly telegram: TelegramService,
     private readonly storage: StorageService,
   ) {}
 
@@ -49,7 +48,11 @@ export class ReconcileService {
           lastId = file.id;
           continue;
         }
-        const ok = await this.telegram.isTelegramDocumentAccessible(file.telegramFileId);
+        const tenant = await this.storage.resolveTenantForFile(file.id);
+        const ok = await telegramIsDocumentAccessible(
+          tenant.telegramBotToken,
+          file.telegramFileId,
+        );
         if (delayMs > 0) {
           await sleep(delayMs);
         }
@@ -66,7 +69,7 @@ export class ReconcileService {
 
         staleFound++;
         if (!dryRun) {
-          await this.storage.deleteFile(file.id);
+          await this.storage.deleteFile(tenant, file.id);
           removedFromDb++;
         }
 

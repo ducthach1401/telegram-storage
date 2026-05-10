@@ -9,16 +9,23 @@ import {
   PrimaryGeneratedColumn,
   Unique,
 } from 'typeorm';
+import { Account } from '../../../accounts/account.entity';
 import { StoredFile } from './stored-file.entity';
 
 @Entity('folders')
-@Unique(['parentId', 'name'])
+@Unique(['accountId', 'parentId', 'name'])
 export class Folder {
   @PrimaryGeneratedColumn('uuid')
   id: string;
 
+  @Column({ type: 'varchar', length: 36, nullable: true })
+  accountId: string | null;
+
+  @ManyToOne(() => Account, { onDelete: 'CASCADE', nullable: true })
+  @JoinColumn({ name: 'accountId' })
+  account: Account | null;
+
   @Column({ type: 'varchar', nullable: true })
-  @Index()
   parentId: string | null;
 
   @ManyToOne(() => Folder, (f) => f.children, { onDelete: 'CASCADE', nullable: true })

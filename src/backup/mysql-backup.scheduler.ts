@@ -8,9 +8,10 @@ import { join } from 'path';
 import { pipeline } from 'stream/promises';
 import { createGzip } from 'zlib';
 import { CronJob } from 'cron';
+import { AccountService } from '../accounts/account.service';
 import { EnvKey } from '../common/env-keys';
 import { MimeType } from '../common/http.constants';
-import { ROOT_FOLDER_ID } from '../storage/domain/constants';
+import { RuntimeConfigService } from '../settings/runtime-config.service';
 import { StorageService } from '../storage/storage.service';
 import { TelegramService } from '../storage/telegram/telegram.service';
 
@@ -25,40 +26,52 @@ export class MysqlBackupSchedulerService implements OnModuleInit {
 
   constructor(
     private readonly config: ConfigService,
+    private readonly runtime: RuntimeConfigService,
     private readonly telegram: TelegramService,
     private readonly storage: StorageService,
+    private readonly accounts: AccountService,
     private readonly schedulerRegistry: SchedulerRegistry,
   ) {}
 
   onModuleInit(): void {
-    const enabled =
-      this.config.get<string>(EnvKey.MYSQL_BACKUP_ENABLED)?.trim() === 'true';
-    if (!enabled) {
-      this.log.log('MySQL → Telegram backup tắt (MYSQL_BACKUP_ENABLED≠true)');
-      return;
-    }
+    void this.refreshScheduleFromRuntime();
+  }
 
-    const expr =
-      this.config.get<string>(EnvKey.MYSQL_BACKUP_CRON)?.trim() || '0 3 * * 0';
-
+  /** Đọc cấu hình backup từ runtime (env + DB); gọi lại sau PATCH admin/settings. */
+  async refreshScheduleFromRuntime(): Promise<void> {
     try {
       this.schedulerRegistry.deleteCronJob(CRON_JOB_NAME);
     } catch {
       /* no previous job */
     }
 
-    const job = new CronJob(expr, () => {
-      void this.runBackupJob();
-    });
-    this.schedulerRegistry.addCronJob(CRON_JOB_NAME, job);
-    job.start();
-    this.log.log(
-      `Đã bật backup MySQL → kênh lưu (${EnvKey.TELEGRAM_STORAGE_CHAT_ID}) / thư mục ảo, cron: "${expr}"`,
-    );
+    const enabled =
+      this.runtime.effectiveTrimmed(EnvKey.MYSQL_BACKUP_ENABLED) === 'true';
+    if (!enabled) {
+      this.log.log('MySQL → Telegram backup tắt (MYSQL_BACKUP_ENABLED≠true)');
+      return;
+    }
+
+    const expr =
+      this.runtime.effectiveTrimmed(EnvKey.MYSQL_BACKUP_CRON) || '0 3 * * 0';
+
+    try {
+      const job = new CronJob(expr, () => {
+        void this.runBackupJob();
+      });
+      this.schedulerRegistry.addCronJob(CRON_JOB_NAME, job);
+      job.start();
+      this.log.log(
+        `Đã bật backup MySQL → kênh lưu của admin đầu tiên / thư mục ảo, cron: "${expr}"`,
+      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.log.error(`Cron backup không hợp lệ (${expr}): ${msg}`);
+    }
   }
 
   private backupFolderDisplayName(): string {
-    const raw = this.config.get<string>(EnvKey.MYSQL_BACKUP_FOLDER_NAME)?.trim();
+    const raw = this.runtime.effectiveTrimmed(EnvKey.MYSQL_BACKUP_FOLDER_NAME);
     return raw && raw.length > 0 ? raw : 'backup';
   }
 
@@ -100,13 +113,23 @@ export class MysqlBackupSchedulerService implements OnModuleInit {
         return;
       }
 
+      const adminAcc = await this.accounts.findPrimaryAdmin();
+      if (!adminAcc) {
+        const msg = 'Backup MySQL: không tìm thấy admin nào trong DB.';
+        this.log.warn(msg);
+        await this.telegram.sendAlertPlainText(msg);
+        return;
+      }
+      const tenant = this.storage.storageTenantFromAccountEntity(adminAcc);
       const folderLabel = this.backupFolderDisplayName();
       const folderId = await this.storage.ensureNamedChildFolder(
-        ROOT_FOLDER_ID,
+        tenant,
+        adminAcc.rootFolderId,
         folderLabel,
       );
       const buffer = await readFile(outPath);
       await this.storage.persistUploadedDocument(
+        tenant,
         folderId,
         fileName,
         MimeType.OCTET_STREAM,

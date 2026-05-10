@@ -1,9 +1,12 @@
-const CACHE_NAME = "telegram-drive-shell-v15";
+const CACHE_NAME = "telegram-drive-shell-v19";
 const APP_SHELL = [
   "/",
   "/index.html",
+  "/login.html",
+  "/register.html",
   "/styles.css",
   "/app.js",
+  "/auth-pages.js",
   "/logo.svg",
   "/manifest.webmanifest",
 ];
@@ -38,7 +41,13 @@ self.addEventListener("fetch", (event) => {
   }
 
   if (request.mode === "navigate") {
-    event.respondWith(fetch(request).catch(() => caches.match("/index.html")));
+    event.respondWith(
+      fetch(request).catch(async () => {
+        const cached = await caches.match(request);
+        if (cached) return cached;
+        return caches.match("/index.html");
+      }),
+    );
     return;
   }
 

@@ -2,7 +2,8 @@ import { EnvKey } from './env-keys';
 
 /** Giá trị mặc định khi env không set (upload size / concurrency). */
 export const UploadDefaults = {
-  MINIO_LIMIT_GB_FALLBACK: 50,
+  /** Quota MinIO (GB) cho admin đầu tiên khi bootstrap DB — không phải trần server. */
+  BOOTSTRAP_ADMIN_MINIO_GB: 50,
   TELEGRAM_DOWNLOAD_MAX_MB_FALLBACK: 20,
   QUEUE_CONCURRENCY_FALLBACK: 3,
   QUEUE_ATTEMPTS_FALLBACK: 5,

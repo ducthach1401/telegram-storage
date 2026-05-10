@@ -1,10 +1,12 @@
 import { BullModule } from '@nestjs/bullmq';
-import { Module } from '@nestjs/common';
+import { forwardRef, Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
-import { MulterModule } from '@nestjs/platform-express';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { AccountsModule } from '../accounts/accounts.module';
+import { Account } from '../accounts/account.entity';
 import { EnvKey } from '../common/env-keys';
 import { UploadDefaults } from '../common/upload.defaults';
+import { SettingsModule } from '../settings/settings.module';
 import { FileTag } from './domain/entities/file-tag.entity';
 import { Folder } from './domain/entities/folder.entity';
 import { StoredFile } from './domain/entities/stored-file.entity';
@@ -22,6 +24,7 @@ import {
   BullMqBackoffType,
   FILE_UPLOAD_QUEUE,
 } from './queue/file-upload.constants';
+import { MysqlImportMulterInterceptor } from './interceptors/mysql-import-file.interceptor';
 import { FileUploadProcessor } from './queue/file-upload.processor';
 import { FOLDER_ZIP_QUEUE } from './queue/folder-zip.constants';
 import { FolderZipProcessor } from './queue/folder-zip.processor';
@@ -34,21 +37,9 @@ import { TelegramService } from './telegram/telegram.service';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([Folder, StoredFile, FileTag]),
-    MulterModule.registerAsync({
-      imports: [ConfigModule],
-      inject: [ConfigService],
-      useFactory: (config: ConfigService) => ({
-        limits: {
-          fileSize:
-            (Number(config.get<string>(EnvKey.MINIO_LIMIT_GB)) ||
-              UploadDefaults.MINIO_LIMIT_GB_FALLBACK) *
-            1024 *
-            1024 *
-            1024,
-        },
-      }),
-    }),
+    forwardRef(() => AccountsModule),
+    SettingsModule,
+    TypeOrmModule.forFeature([Folder, StoredFile, FileTag, Account]),
     BullModule.forRootAsync({
       imports: [ConfigModule],
       inject: [ConfigService],
@@ -115,6 +106,7 @@ import { TelegramService } from './telegram/telegram.service';
     TelegramService,
     ShareDownloadTokenService,
     FolderZipDownloadTokenService,
+    MysqlImportMulterInterceptor,
     FileUploadProcessor,
     FolderZipProcessor,
     TelegramSyncService,

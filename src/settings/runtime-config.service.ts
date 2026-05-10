@@ -1,0 +1,316 @@
+import {
+  BadRequestException,
+  Injectable,
+  Logger,
+  OnModuleInit,
+} from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { InjectRepository } from '@nestjs/typeorm';
+import { Repository } from 'typeorm';
+import { EnvKey } from '../common/env-keys';
+import { UploadDefaults } from '../common/upload.defaults';
+import { AppSetting } from './app-setting.entity';
+import {
+  ADMIN_PATCHABLE_KEYS,
+  ADMIN_READONLY_QUEUE_KEYS,
+  TELEGRAM_DB_ONLY_KEYS,
+  type AdminPatchableKey,
+} from './managed-settings.constants';
+import type { UpdateAdminSettingsDto } from './dto/update-admin-settings.dto';
+
+@Injectable()
+export class RuntimeConfigService implements OnModuleInit {
+  private readonly log = new Logger(RuntimeConfigService.name);
+  private overrides = new Map<string, string>();
+  private readonly telegramDbOnly = new Set<string>(TELEGRAM_DB_ONLY_KEYS);
+
+  constructor(
+    @InjectRepository(AppSetting)
+    private readonly repo: Repository<AppSetting>,
+    private readonly config: ConfigService,
+  ) {}
+
+  async onModuleInit(): Promise<void> {
+    await this.reloadOverrides();
+    await this.migrateLegacyTelegramStorageChatKey();
+    await this.reloadOverrides();
+    await this.ensureAllPatchableSettingsSeeded();
+    await this.reloadOverrides();
+  }
+
+  /** Đổi tên khóa cũ `TELEGRAM_STORAGE_CHAT_ID` → `TELEGRAM_STORAGE_CHAT_FOR_PUBLIC_ID` trong DB. */
+  private async migrateLegacyTelegramStorageChatKey(): Promise<void> {
+    const LEGACY = 'TELEGRAM_STORAGE_CHAT_ID';
+    const next = EnvKey.TELEGRAM_STORAGE_CHAT_FOR_PUBLIC_ID;
+    const legacyRow = await this.repo.findOne({ where: { key: LEGACY } });
+    if (!legacyRow) {
+      return;
+    }
+    const hasNext = await this.repo.exist({ where: { key: next } });
+    if (!hasNext) {
+      await this.repo.save(this.repo.create({ key: next, value: legacyRow.value }));
+      this.log.log(`Đã chuyển ${LEGACY} → ${next} trong app_settings.`);
+    }
+    await this.repo.delete({ key: LEGACY });
+  }
+
+  /**
+   * Lần đầu chạy (hoặc sau khi xóa tay): tạo đủ dòng `app_settings` cho mọi khóa Cài đặt server.
+   * Giá trị lấy từ env / `.env` qua ConfigService và fallback giống logic đọc hiệu lực — không ghi đè dòng đã có.
+   */
+  private async ensureAllPatchableSettingsSeeded(): Promise<void> {
+    let inserted = 0;
+    for (const key of ADMIN_PATCHABLE_KEYS) {
+      if (this.overrides.has(key)) {
+        continue;
+      }
+      const value = this.initialStoredValueForKey(key);
+      await this.repo.save(this.repo.create({ key, value }));
+      inserted += 1;
+    }
+    if (inserted > 0) {
+      this.log.log(
+        `Đã khởi tạo ${inserted} khóa trong app_settings (thiếu trong DB).`,
+      );
+    }
+  }
+
+  /** Giá trị lưu DB lần đầu — chỉ env + default code, không đọc bảng overrides. */
+  private initialStoredValueForKey(key: AdminPatchableKey): string {
+    const get = (k: string) => this.config.get<string>(k);
+    const trim = (v: string | undefined) => (v ?? '').trim();
+
+    switch (key) {
+      case EnvKey.PUBLIC_APP_URL:
+        return trim(get(EnvKey.PUBLIC_APP_URL));
+      case EnvKey.TELEGRAM_STORAGE_CHAT_FOR_PUBLIC_ID:
+        return '';
+      case EnvKey.TELEGRAM_ALERT_CHAT_ID:
+        return trim(get(EnvKey.TELEGRAM_ALERT_CHAT_ID));
+      case EnvKey.TELEGRAM_SYNC_FOLDER_ID:
+        return trim(get(EnvKey.TELEGRAM_SYNC_FOLDER_ID));
+      case EnvKey.SHARE_RATE_LIMIT_TTL_MS: {
+        const n = Number(get(EnvKey.SHARE_RATE_LIMIT_TTL_MS) ?? '60000');
+        return String(Math.max(1000, Number.isFinite(n) ? n : 60000));
+      }
+      case EnvKey.SHARE_RATE_LIMIT_MAX: {
+        const n = Number(get(EnvKey.SHARE_RATE_LIMIT_MAX) ?? '60');
+        return String(Math.max(1, Number.isFinite(n) ? n : 60));
+      }
+      case EnvKey.FOLDER_ZIP_MAX_FILES: {
+        const raw = trim(get(EnvKey.FOLDER_ZIP_MAX_FILES));
+        if (!raw) {
+          return '2000';
+        }
+        const n = Number(raw);
+        if (!Number.isFinite(n) || n < 1) {
+          return '2000';
+        }
+        return String(Math.min(Math.floor(n), 50000));
+      }
+      case EnvKey.FOLDER_ZIP_DOWNLOAD_TOKEN_TTL_SECONDS: {
+        const raw = trim(get(EnvKey.FOLDER_ZIP_DOWNLOAD_TOKEN_TTL_SECONDS));
+        const n = raw !== '' ? Number(raw) : 3600;
+        const ttl = Math.min(Math.max(Number.isFinite(n) ? n : 3600, 60), 604800);
+        return String(ttl);
+      }
+      case EnvKey.TELEGRAM_DOWNLOAD_MAX_MB: {
+        const mb = Number(
+          get(EnvKey.TELEGRAM_DOWNLOAD_MAX_MB) ??
+            String(UploadDefaults.TELEGRAM_DOWNLOAD_MAX_MB_FALLBACK),
+        );
+        const safe = Number.isFinite(mb)
+          ? mb
+          : UploadDefaults.TELEGRAM_DOWNLOAD_MAX_MB_FALLBACK;
+        return String(Math.max(1, Math.floor(safe)));
+      }
+      case EnvKey.MYSQL_IMPORT_MAX_MB: {
+        const mb = Number(get(EnvKey.MYSQL_IMPORT_MAX_MB) ?? '512');
+        const safe = Number.isFinite(mb) && mb > 0 ? mb : 512;
+        return String(Math.floor(safe));
+      }
+      case EnvKey.MYSQL_BACKUP_ENABLED:
+        return trim(get(EnvKey.MYSQL_BACKUP_ENABLED)) === 'true' ? 'true' : 'false';
+      case EnvKey.MYSQL_BACKUP_CRON:
+        return trim(get(EnvKey.MYSQL_BACKUP_CRON)) || '0 3 * * 0';
+      case EnvKey.MYSQL_BACKUP_FOLDER_NAME:
+        return trim(get(EnvKey.MYSQL_BACKUP_FOLDER_NAME)) || 'backup';
+      default: {
+        const _exhaustive: never = key;
+        return _exhaustive;
+      }
+    }
+  }
+
+  async reloadOverrides(): Promise<void> {
+    const rows = await this.repo.find();
+    this.overrides = new Map(rows.map((r) => [r.key, r.value]));
+  }
+
+  /** Raw effective: DB row wins if present (kể cả chuỗi rỗng). */
+  effectiveRaw(key: string): string | undefined {
+    if (this.telegramDbOnly.has(key)) {
+      return this.overrides.has(key) ? this.overrides.get(key) : undefined;
+    }
+    if (this.overrides.has(key)) {
+      return this.overrides.get(key);
+    }
+    return this.config.get<string>(key);
+  }
+
+  effectiveTrimmed(key: string): string | undefined {
+    const v = this.effectiveRaw(key);
+    if (v === undefined) {
+      return undefined;
+    }
+    return v.trim();
+  }
+
+  shareRateLimitTtlMs(): number {
+    const n = Number(
+      this.effectiveRaw(EnvKey.SHARE_RATE_LIMIT_TTL_MS) ?? '60000',
+    );
+    return Math.max(1000, Number.isFinite(n) ? n : 60000);
+  }
+
+  shareRateLimitMax(): number {
+    const n = Number(this.effectiveRaw(EnvKey.SHARE_RATE_LIMIT_MAX) ?? '60');
+    return Math.max(1, Number.isFinite(n) ? n : 60);
+  }
+
+  telegramDownloadMaxBytes(): number {
+    const mb = Number(
+      this.effectiveRaw(EnvKey.TELEGRAM_DOWNLOAD_MAX_MB) ??
+        String(UploadDefaults.TELEGRAM_DOWNLOAD_MAX_MB_FALLBACK),
+    );
+    const safe = Number.isFinite(mb) ? mb : UploadDefaults.TELEGRAM_DOWNLOAD_MAX_MB_FALLBACK;
+    return Math.max(1, Math.floor(safe)) * 1024 * 1024;
+  }
+
+  mysqlImportMaxBytes(): number {
+    const mb = Number(this.effectiveRaw(EnvKey.MYSQL_IMPORT_MAX_MB) ?? '512');
+    const safe = Number.isFinite(mb) && mb > 0 ? mb : 512;
+    return Math.floor(safe) * 1024 * 1024;
+  }
+
+  overrideKeys(): string[] {
+    return [...this.overrides.keys()];
+  }
+
+  queueEnvSnapshot(): Record<string, number> {
+    const out: Record<string, number> = {};
+    for (const k of ADMIN_READONLY_QUEUE_KEYS) {
+      const raw = process.env[k];
+      const n = Number(raw);
+      if (k === EnvKey.UPLOAD_QUEUE_CONCURRENCY) {
+        out[k] = Math.max(
+          1,
+          Number.isFinite(n)
+            ? n
+            : UploadDefaults.QUEUE_CONCURRENCY_FALLBACK,
+        );
+      } else if (k === EnvKey.UPLOAD_QUEUE_ATTEMPTS) {
+        out[k] = Math.max(
+          1,
+          Number.isFinite(n)
+            ? n
+            : UploadDefaults.QUEUE_ATTEMPTS_FALLBACK,
+        );
+      } else if (k === EnvKey.UPLOAD_QUEUE_BACKOFF_MS) {
+        out[k] = Math.max(
+          1000,
+          Number.isFinite(n)
+            ? n
+            : UploadDefaults.QUEUE_BACKOFF_MS_FALLBACK,
+        );
+      }
+    }
+    return out;
+  }
+
+  getAdminEffectivePayload(): Record<string, string | number | boolean> {
+    const effective: Record<string, string | number | boolean> = {};
+    for (const key of ADMIN_PATCHABLE_KEYS) {
+      effective[key] = this.serializeEffectiveForAdmin(key);
+    }
+    return effective;
+  }
+
+  private serializeEffectiveForAdmin(key: AdminPatchableKey): string | number | boolean {
+    if (key === EnvKey.SHARE_RATE_LIMIT_TTL_MS) {
+      return this.shareRateLimitTtlMs();
+    }
+    if (key === EnvKey.SHARE_RATE_LIMIT_MAX) {
+      return this.shareRateLimitMax();
+    }
+    if (key === EnvKey.TELEGRAM_DOWNLOAD_MAX_MB) {
+      return Math.round(this.telegramDownloadMaxBytes() / (1024 * 1024));
+    }
+    if (key === EnvKey.MYSQL_IMPORT_MAX_MB) {
+      return Math.round(this.mysqlImportMaxBytes() / (1024 * 1024));
+    }
+    if (key === EnvKey.MYSQL_BACKUP_ENABLED) {
+      return (
+        (this.effectiveTrimmed(EnvKey.MYSQL_BACKUP_ENABLED) ?? 'false') === 'true'
+      );
+    }
+    if (key === EnvKey.FOLDER_ZIP_DOWNLOAD_TOKEN_TTL_SECONDS) {
+      const raw = this.effectiveRaw(key)?.trim();
+      const n =
+        raw !== undefined && raw !== ''
+          ? Number(raw)
+          : 3600;
+      const ttl = Math.min(Math.max(Number.isFinite(n) ? n : 3600, 60), 604800);
+      return ttl;
+    }
+    if (key === EnvKey.FOLDER_ZIP_MAX_FILES) {
+      const raw = this.effectiveRaw(key)?.trim();
+      const n = raw !== undefined && raw !== '' ? Number(raw) : NaN;
+      if (!Number.isFinite(n) || n < 1) {
+        return 2000;
+      }
+      return Math.min(Math.floor(n), 50000);
+    }
+    const raw = this.effectiveRaw(key);
+    return raw ?? '';
+  }
+
+  async persistAdminPatch(dto: UpdateAdminSettingsDto): Promise<void> {
+    const entries: Array<[AdminPatchableKey, string | number | null]> = [];
+    for (const key of ADMIN_PATCHABLE_KEYS) {
+      const prop = key as keyof UpdateAdminSettingsDto;
+      if (!(prop in dto) || dto[prop] === undefined) {
+        continue;
+      }
+      entries.push([key, dto[prop] as string | number | null]);
+    }
+
+    for (const [key, val] of entries) {
+      const envKey = key as AdminPatchableKey;
+      if (val === null) {
+        await this.repo.delete({ key: envKey });
+        this.overrides.delete(envKey);
+        continue;
+      }
+      const str =
+        typeof val === 'number'
+          ? String(val)
+          : typeof val === 'boolean'
+            ? val
+              ? 'true'
+              : 'false'
+            : String(val).trim();
+      if (
+        envKey === EnvKey.MYSQL_BACKUP_CRON &&
+        str.length > 0 &&
+        !/^[\d\*\-\/,\s]+$/.test(str)
+      ) {
+        throw new BadRequestException('MYSQL_BACKUP_CRON không hợp lệ');
+      }
+      await this.repo.save(this.repo.create({ key: envKey, value: str }));
+      this.overrides.set(envKey, str);
+    }
+
+    this.log.log(`Đã cập nhật ${entries.length} cấu hình runtime`);
+  }
+}

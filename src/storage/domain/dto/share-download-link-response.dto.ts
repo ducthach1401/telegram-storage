@@ -20,7 +20,7 @@ export class ShareDownloadLinkResponseDto {
   viewPath: string;
 
   @ApiPropertyOptional({
-    description: 'URL đầy đủ nếu có PUBLIC_APP_URL trong env',
+    description: 'URL đầy đủ khi đã cấu hình PUBLIC_APP_URL (admin Settings / runtime)',
   })
   downloadUrl?: string;
 

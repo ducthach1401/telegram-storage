@@ -2,12 +2,17 @@
 export const EnvKey = {
   APP_PORT: 'APP_PORT',
   SERVICE_NAME: 'SERVICE_NAME',
-  API_BASIC_AUTH_USER: 'API_BASIC_AUTH_USER',
-  API_BASIC_AUTH_PASSWORD: 'API_BASIC_AUTH_PASSWORD',
   DOWNLOAD_SHARE_SECRET: 'DOWNLOAD_SHARE_SECRET',
   PUBLIC_APP_URL: 'PUBLIC_APP_URL',
+  /** Tên env cũ — runtime không lấy bot token từ đây (token trên admin đầu tiên trong DB). */
   TELEGRAM_BOT_TOKEN: 'TELEGRAM_BOT_TOKEN',
-  TELEGRAM_STORAGE_CHAT_ID: 'TELEGRAM_STORAGE_CHAT_ID',
+  /**
+   * Chat/kênh lưu file **chung** (chỉ `app_settings` / UI — không đọc env): user `telegramUsePlatformDefaults` + webhook khi khớp ID.
+   * Để trống — dùng `telegramStorageChatId` trên admin đầu tiên.
+   */
+  TELEGRAM_STORAGE_CHAT_FOR_PUBLIC_ID: 'TELEGRAM_STORAGE_CHAT_FOR_PUBLIC_ID',
+  /** Không còn dùng trong code; giữ key để tài liệu/.env cũ không gây lỗi parse. */
+  TELEGRAM_PLATFORM_STORAGE_CHAT_ID: 'TELEGRAM_PLATFORM_STORAGE_CHAT_ID',
   /** Chat/channel nhận cảnh báo lỗi (5xx, job queue fail). Để trống = không gửi Telegram. */
   TELEGRAM_ALERT_CHAT_ID: 'TELEGRAM_ALERT_CHAT_ID',
   TELEGRAM_WEBHOOK_SECRET: 'TELEGRAM_WEBHOOK_SECRET',
@@ -27,7 +32,6 @@ export const EnvKey = {
   MINIO_SECRET_KEY: 'MINIO_SECRET_KEY',
   MINIO_BUCKET: 'MINIO_BUCKET',
   MINIO_FORCE_PATH_STYLE: 'MINIO_FORCE_PATH_STYLE',
-  MINIO_LIMIT_GB: 'MINIO_LIMIT_GB',
   UPLOAD_TMP_DIR: 'UPLOAD_TMP_DIR',
   UPLOAD_QUEUE_CONCURRENCY: 'UPLOAD_QUEUE_CONCURRENCY',
   UPLOAD_QUEUE_ATTEMPTS: 'UPLOAD_QUEUE_ATTEMPTS',

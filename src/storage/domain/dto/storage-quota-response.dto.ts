@@ -30,7 +30,17 @@ export class StorageQuotaResponseDto {
   @ApiProperty({ example: 2147483648 })
   minioBytes: number;
 
-  @ApiProperty({ example: 53687091200 })
+  @ApiProperty({
+    example: 10737418240,
+    description: 'Quota MinIO theo account (bytes); 0 = chỉ Telegram cho file ≥ 20MB',
+  })
+  accountMinioLimitBytes: number;
+
+  @ApiProperty({
+    example: 10737418240,
+    description:
+      'Giới hạn hiển thị cho thanh MinIO: bằng accountMinioLimitBytes nếu > 0, ngược lại 0',
+  })
   minioLimitBytes: number;
 
   @ApiProperty({ type: [StorageMimeUsageDto] })

@@ -44,8 +44,11 @@
           <button class="nav-item" data-view="queue">
             <span>↻</span><span data-i18n="queue">Queue lỗi</span>
           </button>
+          <button class="nav-item" data-view="settings">
+            <span>⚙</span><span data-i18n="settings">Cài đặt</span>
+          </button>
           <button class="nav-item" data-view="admin">
-            <span>⚙</span><span data-i18n="admin">Admin/API</span>
+            <span>🔧</span><span data-i18n="admin">Admin/API</span>
           </button>
         </nav>
 
@@ -56,7 +59,7 @@
           <div class="quota-bar"><span id="quotaBar"></span></div>
           <p class="quota-usage" id="quotaTotal">--</p>
           <div class="quota-header mini">
-            <span>MinIO</span>
+            <span data-i18n="minioQuotaLabel">MinIO</span>
           </div>
           <div class="quota-bar minio"><span id="minioQuotaBar"></span></div>
           <p class="quota-usage" id="minioQuotaDetail">--</p>
@@ -99,10 +102,19 @@
                 <div class="breadcrumbs" id="breadcrumbs"></div>
                 <div class="selection-bar hidden" id="selectionBar">
                   <span id="selectionCount">0 file đã chọn</span>
+                  <div class="selection-actions">
+                    <button type="button" class="ghost compact" id="selectionMoveButton" data-i18n="moveSelected">
+                      Di chuyển
+                    </button>
+                    <button type="button" class="ghost compact danger-text" id="selectionDeleteButton" data-i18n="deleteSelected">
+                      Xóa
+                    </button>
+                  </div>
                 </div>
               </div>
             </div>
             <div class="panel-actions">
+              <button class="ghost hidden" type="button" id="selectModeToggle" aria-pressed="false">Chọn nhiều</button>
               <button class="ghost" id="viewToggleButton">Grid</button>
               <button class="ghost" id="folderMenuButton">⋮</button>
             </div>
@@ -189,6 +201,37 @@
             <div class="empty" data-i18n="adminOutputHint">Chọn một tính năng admin để xem kết quả.</div>
           </section>
         </section>
+
+        <section class="panel hidden" id="settingsView">
+          <div class="panel-head">
+            <div>
+              <h2 data-i18n="settings">Cài đặt</h2>
+              <p data-i18n="settingsHint">Quota MinIO và giới hạn upload theo tài khoản.</p>
+            </div>
+          </div>
+          <div id="settingsSelfCard"></div>
+          <div class="settings-admin-wrap hidden" id="settingsSystemSection">
+            <div class="settings-admin-head">
+              <h3 data-i18n="systemSettingsTitle">Cấu hình server</h3>
+              <button type="button" class="ghost compact" id="settingsSystemRefreshButton" data-i18n="refresh">
+                Làm mới
+              </button>
+            </div>
+            <p class="settings-muted" data-i18n="systemSettingsHint">
+              Giới hạn, backup, rate-limit… (không gồm credential/kết nối DB/Redis/MinIO).
+            </p>
+            <div id="settingsSystemFormMount"></div>
+          </div>
+          <div class="settings-admin-wrap hidden" id="settingsAdminSection">
+            <div class="settings-admin-head">
+              <h3 data-i18n="adminAccountQuotaTitle">Quota MinIO theo tài khoản</h3>
+              <button type="button" class="ghost compact" id="settingsAccountsRefreshButton" data-i18n="refresh">
+                Làm mới
+              </button>
+            </div>
+            <div id="settingsAccountsTable" class="settings-accounts-table-wrap"></div>
+          </div>
+        </section>
       </main>
     </div>
 
@@ -224,25 +267,6 @@
         <div class="modal-actions">
           <button type="button" class="ghost" id="modalCancelButton" data-i18n="cancel">Hủy</button>
           <button type="submit" class="primary-action compact" id="modalSubmitButton" data-i18n="confirm">Xác nhận</button>
-        </div>
-      </form>
-    </div>
-    <div class="modal-backdrop hidden" id="authBackdrop">
-      <form class="modal" id="authModal">
-        <div class="modal-head">
-          <h3 data-i18n="loginTitle">Đăng nhập</h3>
-        </div>
-        <p data-i18n="loginHint">Nhập Basic Auth trong file .env. Phiên đăng nhập sẽ được lưu cho tới khi bạn bấm đăng xuất.</p>
-        <label class="modal-field">
-          <span data-i18n="username">Tài khoản</span>
-          <input id="authUser" autocomplete="username" required />
-        </label>
-        <label class="modal-field">
-          <span data-i18n="password">Mật khẩu</span>
-          <input id="authPass" type="password" autocomplete="current-password" required />
-        </label>
-        <div class="modal-actions">
-          <button type="submit" class="primary-action compact" data-i18n="login">Đăng nhập</button>
         </div>
       </form>
     </div>

@@ -45,7 +45,7 @@ function formatExceptionBrief(exception: unknown): string {
 }
 
 /**
- * Gửi tin lên Telegram (khi có TELEGRAM_ALERT_CHAT_ID) cho lỗi HTTP ≥500 và lỗi không phải HttpException.
+ * Gửi tin lên Telegram (`TELEGRAM_ALERT_CHAT_ID` trong app_settings) cho lỗi HTTP ≥500 và lỗi không phải HttpException.
  */
 @Catch()
 export class TelegramAlertExceptionFilter extends BaseExceptionFilter {

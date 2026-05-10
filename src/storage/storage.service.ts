@@ -27,25 +27,30 @@ import {
   StorageExceptionMessage,
 } from '../common/api-messages';
 import { EnvKey } from '../common/env-keys';
-import { telegramDownloadMaxBytes } from '../common/upload.defaults';
 import {
   CacheControlValue,
   ContentDispositionMode,
   HttpHeader,
   MimeType,
 } from '../common/http.constants';
+import { telegramPublicMessageUrl } from './telegram.constants';
 import {
   MIME_PREFIX_IMAGE,
   ROOT_FOLDER_ALIAS,
-  ROOT_FOLDER_ID,
   TYPEORM_ORDER_ASC,
   VIRTUAL_ROOT_FOLDER_NAME,
 } from './domain/constants';
 import type { DuplicateNamePolicy } from './domain/duplicate-name-policy';
 import { CreateFolderDto } from './domain/dto/create-folder.dto';
+import { Account } from '../accounts/account.entity';
 import { FileTag } from './domain/entities/file-tag.entity';
 import { Folder } from './domain/entities/folder.entity';
 import { StoredFile } from './domain/entities/stored-file.entity';
+import type { StorageTenant } from './domain/storage-tenant';
+import {
+  assertTenantTelegramConfigured,
+  storageTenantFromAccount,
+} from '../accounts/storage-tenant.mapper';
 import {
   decodeFileListCursor,
   decodeFolderListCursor,
@@ -53,8 +58,15 @@ import {
   encodeFolderListCursor,
 } from './domain/file-list-cursor';
 import { contentDispositionHeader } from './content-disposition.header';
+import { AccountService } from '../accounts/account.service';
 import { MinioStorageService } from './s3/minio-storage.service';
-import { TelegramService } from './telegram/telegram.service';
+import {
+  telegramDeleteChatMessage,
+  telegramGetFileDownloadUrl,
+  telegramIsDocumentAccessible,
+  telegramUploadDocument,
+} from './telegram/telegram-bot.operations';
+import { RuntimeConfigService } from '../settings/runtime-config.service';
 
 export interface ListContentsOpts {
   /** Khi có — phân trang file theo cursor */
@@ -87,6 +99,9 @@ export interface StorageQuotaStats {
   trashedFiles: number;
   trashedBytes: number;
   minioBytes: number;
+  /** Quota MinIO gán cho account (bytes); 0 = không dùng MinIO cho file ≥ 20MB. */
+  accountMinioLimitBytes: number;
+  /** Giới hạn hiển thị / thanh tiến độ: bằng accountMinioLimitBytes khi > 0, ngược lại 0. */
   minioLimitBytes: number;
   byMimeType: Array<{ mimeType: string; files: number; bytes: number }>;
 }
@@ -115,49 +130,79 @@ export class StorageService implements OnModuleInit {
     private readonly fileRepo: Repository<StoredFile>,
     @InjectRepository(FileTag)
     private readonly tagRepo: Repository<FileTag>,
-    private readonly telegram: TelegramService,
+    @InjectRepository(Account)
+    private readonly accountRepo: Repository<Account>,
     private readonly minio: MinioStorageService,
     private readonly config: ConfigService,
+    private readonly runtime: RuntimeConfigService,
+    private readonly accountBootstrap: AccountService,
   ) {}
 
   async onModuleInit() {
-    const root = await this.folderRepo.findOne({ where: { id: ROOT_FOLDER_ID } });
-    if (!root) {
-      await this.folderRepo.save(
-        this.folderRepo.create({
-          id: ROOT_FOLDER_ID,
-          parentId: null,
-          name: VIRTUAL_ROOT_FOLDER_NAME,
-        }),
-      );
-    }
+    await this.accountBootstrap.bootstrapFromEnvIfEmpty();
   }
 
-  resolveFolderId(folderParam: string): string {
-    return folderParam === ROOT_FOLDER_ALIAS ? ROOT_FOLDER_ID : folderParam;
+  storageTenantFromAccountEntity(account: Account): StorageTenant {
+    return storageTenantFromAccount(account, this.accountBootstrap.getPlatformTelegramMergeDefaultsSync());
+  }
+
+  async resolveTenantForFile(fileId: string): Promise<StorageTenant> {
+    const file = await this.fileRepo.findOne({
+      where: { id: fileId },
+      relations: { folder: true },
+    });
+    if (!file?.folder?.accountId) {
+      throw new NotFoundException(StorageExceptionMessage.FOLDER_NOT_FOUND);
+    }
+    const acc = await this.accountRepo.findOne({ where: { id: file.folder.accountId } });
+    if (!acc) {
+      throw new NotFoundException(StorageExceptionMessage.FOLDER_NOT_FOUND);
+    }
+    return storageTenantFromAccount(acc);
+  }
+
+  async resolveTenantForFolder(folderId: string): Promise<StorageTenant> {
+    const folder = await this.folderRepo.findOne({ where: { id: folderId } });
+    if (!folder?.accountId) {
+      throw new NotFoundException(StorageExceptionMessage.FOLDER_NOT_FOUND);
+    }
+    const acc = await this.accountRepo.findOne({ where: { id: folder.accountId } });
+    if (!acc) {
+      throw new NotFoundException(StorageExceptionMessage.FOLDER_NOT_FOUND);
+    }
+    return storageTenantFromAccount(acc);
+  }
+
+  resolveFolderId(t: StorageTenant, folderParam: string): string {
+    return folderParam === ROOT_FOLDER_ALIAS ? t.rootFolderId : folderParam;
   }
 
   /** Thư mục đích upload (multipart `folderId` rỗng = gốc). */
-  uploadTargetFolderId(folderIdParam: string | undefined): string {
+  uploadTargetFolderId(t: StorageTenant, folderIdParam: string | undefined): string {
     if (folderIdParam === undefined || folderIdParam === '') {
-      return ROOT_FOLDER_ID;
+      return t.rootFolderId;
     }
-    return this.resolveFolderId(folderIdParam);
+    return this.resolveFolderId(t, folderIdParam);
   }
 
-  async ensureFolder(id: string): Promise<Folder> {
+  async ensureFolder(t: StorageTenant, id: string): Promise<Folder> {
     const folder = await this.folderRepo.findOne({ where: { id, deletedAt: IsNull() } });
-    if (!folder) {
+    if (!folder || folder.accountId !== t.accountId) {
       throw new NotFoundException(StorageExceptionMessage.FOLDER_NOT_FOUND);
     }
     return folder;
   }
 
-  async createFolder(dto: CreateFolderDto): Promise<Folder> {
-    const parentId = dto.parentId ?? ROOT_FOLDER_ID;
-    await this.ensureFolder(parentId);
+  async createFolder(t: StorageTenant, dto: CreateFolderDto): Promise<Folder> {
+    const parentId = dto.parentId ?? t.rootFolderId;
+    await this.ensureFolder(t, parentId);
     const exists = await this.folderRepo.findOne({
-      where: { parentId, name: dto.name, deletedAt: IsNull() },
+      where: {
+        accountId: t.accountId,
+        parentId,
+        name: dto.name,
+        deletedAt: IsNull(),
+      },
     });
     if (exists) {
       throw new ConflictException(StorageExceptionMessage.FOLDER_DUPLICATE_NAME);
@@ -165,6 +210,7 @@ export class StorageService implements OnModuleInit {
     const folder = this.folderRepo.create({
       parentId,
       name: dto.name,
+      accountId: t.accountId,
     });
     return this.folderRepo.save(folder);
   }
@@ -172,25 +218,31 @@ export class StorageService implements OnModuleInit {
   /**
    * Đảm bảo có thư mục con `folderName` dưới `parentId`; không throw khi đã tồn tại (khác `createFolder`).
    */
-  async ensureNamedChildFolder(parentId: string, folderName: string): Promise<string> {
+  async ensureNamedChildFolder(t: StorageTenant, parentId: string, folderName: string): Promise<string> {
     const name = folderName.trim();
     if (!name) {
       throw new BadRequestException(StorageExceptionMessage.FOLDER_NAME_EMPTY);
     }
-    await this.ensureFolder(parentId);
+    await this.ensureFolder(t, parentId);
     const existing = await this.folderRepo.findOne({
-      where: { parentId, name, deletedAt: IsNull() },
+      where: {
+        accountId: t.accountId,
+        parentId,
+        name,
+        deletedAt: IsNull(),
+      },
     });
     if (existing) {
       return existing.id;
     }
     const created = await this.folderRepo.save(
-      this.folderRepo.create({ parentId, name }),
+      this.folderRepo.create({ parentId, name, accountId: t.accountId }),
     );
     return created.id;
   }
 
   async listContents(
+    t: StorageTenant,
     folderIdParam: string,
     opts?: ListContentsOpts,
   ): Promise<{
@@ -202,8 +254,8 @@ export class StorageService implements OnModuleInit {
     filesNextCursor?: string | null;
     filesLimit?: number;
   }> {
-    const folderId = this.resolveFolderId(folderIdParam);
-    await this.ensureFolder(folderId);
+    const folderId = this.resolveFolderId(t, folderIdParam);
+    await this.ensureFolder(t, folderId);
 
     const folderLimit = opts?.folderLimit;
     let folders: Folder[];
@@ -252,7 +304,7 @@ export class StorageService implements OnModuleInit {
       return {
         folderId,
         folders,
-        files: this.decorateFilesForClient(files),
+        files: this.decorateFilesForClient(files, t.telegramStorageChatId),
         ...(foldersNextCursor !== undefined
           ? { foldersNextCursor, foldersLimit }
           : {}),
@@ -287,7 +339,7 @@ export class StorageService implements OnModuleInit {
     return {
       folderId,
       folders,
-      files: this.decorateFilesForClient(files),
+      files: this.decorateFilesForClient(files, t.telegramStorageChatId),
       ...(foldersNextCursor !== undefined
         ? { foldersNextCursor, foldersLimit }
         : {}),
@@ -300,21 +352,23 @@ export class StorageService implements OnModuleInit {
    * Chuẩn bị upload async: áp dụng reject | overwrite | suffix, trả tên file cuối cho job.
    */
   async prepareAsyncUpload(
+    t: StorageTenant,
     folderIdParam: string | undefined,
     desiredName: string,
     policy: DuplicateNamePolicy,
   ): Promise<{ finalFileName: string }> {
-    const { effectiveName } = await this.resolveUploadTarget(folderIdParam, desiredName, policy);
+    const { effectiveName } = await this.resolveUploadTarget(t, folderIdParam, desiredName, policy);
     return { finalFileName: effectiveName };
   }
 
   async resolveUploadTarget(
+    t: StorageTenant,
     folderIdParam: string | undefined,
     desiredName: string,
     policy: DuplicateNamePolicy,
   ): Promise<{ folderId: string; effectiveName: string }> {
-    const folderId = folderIdParam ? this.resolveFolderId(folderIdParam) : ROOT_FOLDER_ID;
-    await this.ensureFolder(folderId);
+    const folderId = folderIdParam ? this.resolveFolderId(t, folderIdParam) : t.rootFolderId;
+    await this.ensureFolder(t, folderId);
 
     const dup = await this.fileRepo.findOne({
       where: { folderId, name: desiredName, deletedAt: IsNull() },
@@ -402,33 +456,40 @@ export class StorageService implements OnModuleInit {
     return size >= TELEGRAM_ONLY_MAX_BYTES;
   }
 
-  private buildMinioObjectKey(fileName: string): string {
+  private buildMinioObjectKey(t: StorageTenant, fileName: string): string {
     const cleanName = fileName.replace(/[^\w.\-()+ ]+/g, '_').slice(-180) || 'file';
-    return `files/${new Date().toISOString().slice(0, 10)}/${randomUUID()}-${cleanName}`;
+    return `acct/${t.accountId}/files/${new Date().toISOString().slice(0, 10)}/${randomUUID()}-${cleanName}`;
   }
 
-  private async assertMinioCapacity(incomingBytes: number): Promise<void> {
+  private async assertMinioCapacity(t: StorageTenant, incomingBytes: number): Promise<void> {
     if (!this.minio.isEnabled()) {
       throw new BadGatewayException('File >= 20MB cần cấu hình MinIO/S3');
     }
-    const used = await this.minioUsedBytes();
-    const limit = this.minio.limitBytes();
-    if (used + incomingBytes > limit) {
+    const userLimitBytes = Math.floor(Math.max(0, t.minioLimitGb) * 1024 * 1024 * 1024);
+    if (userLimitBytes <= 0) {
+      throw new BadRequestException(
+        'Tài khoản chưa được cấp quota MinIO — chỉ upload được file dưới 20MB.',
+      );
+    }
+    const usedAccount = await this.minioUsedBytesForAccount(t.accountId);
+    if (usedAccount + incomingBytes > userLimitBytes) {
       throw new BadRequestException({
-        message: 'MinIO đã vượt giới hạn dung lượng',
-        usedBytes: used,
+        message: 'Đã vượt quota MinIO của tài khoản',
+        usedBytes: usedAccount,
         incomingBytes,
-        limitBytes: limit,
+        limitBytes: userLimitBytes,
       });
     }
   }
 
-  private async minioUsedBytes(): Promise<number> {
+  private async minioUsedBytesForAccount(accountId: string): Promise<number> {
     const rows = await this.fileRepo
       .createQueryBuilder('f')
+      .innerJoin('f.folder', 'fol')
       .select('f.s3ObjectKey', 'objectKey')
       .addSelect('MAX(f.size)', 'bytes')
       .where('f.s3ObjectKey IS NOT NULL')
+      .andWhere('fol.accountId = :aid', { aid: accountId })
       .groupBy('f.s3ObjectKey')
       .getRawMany<{ objectKey: string; bytes: string }>();
     return rows.reduce((sum, row) => sum + Number(row.bytes || 0), 0);
@@ -449,29 +510,34 @@ export class StorageService implements OnModuleInit {
   }
 
   async saveUploadedFile(
+    t: StorageTenant,
     folderIdParam: string | undefined,
     desiredName: string,
     mimeType: string,
     buffer: Buffer,
     policy: DuplicateNamePolicy,
   ): Promise<StoredFile> {
+    assertTenantTelegramConfigured(t);
     const { folderId, effectiveName } = await this.resolveUploadTarget(
+      t,
       folderIdParam,
       desiredName,
       policy,
     );
-    return this.persistUploadedDocument(folderId, effectiveName, mimeType, buffer);
+    return this.persistUploadedDocument(t, folderId, effectiveName, mimeType, buffer);
   }
 
   /** Gửi Telegram + lưu DB — gọi sau khi đã xử lý trùng tên (upload sync hoặc worker queue). */
   async persistUploadedDocument(
+    t: StorageTenant,
     folderId: string,
     fileName: string,
     mimeType: string,
     buffer: Buffer,
     opts: PersistUploadOptions = {},
   ): Promise<StoredFile> {
-    await this.ensureFolder(folderId);
+    assertTenantTelegramConfigured(t);
+    await this.ensureFolder(t, folderId);
     const dup = await this.fileRepo.findOne({
       where: { folderId, name: fileName, deletedAt: IsNull() },
     });
@@ -487,9 +553,9 @@ export class StorageService implements OnModuleInit {
         return StorageService.markSkippedDuplicate(existingImage);
       }
     }
-    const objectKey = this.shouldStoreInMinio(size) ? this.buildMinioObjectKey(fileName) : null;
+    const objectKey = this.shouldStoreInMinio(size) ? this.buildMinioObjectKey(t, fileName) : null;
     if (objectKey) {
-      await this.assertMinioCapacity(size);
+      await this.assertMinioCapacity(t, size);
     }
 
     let uploaded:
@@ -510,7 +576,13 @@ export class StorageService implements OnModuleInit {
       }
       if (this.shouldStoreInTelegram(size)) {
         const thumb = await this.maybeThumbnail(buffer, mimeType);
-        uploaded = await this.telegram.uploadDocument(buffer, fileName, thumb);
+        uploaded = await telegramUploadDocument({
+          token: t.telegramBotToken,
+          chatId: t.telegramStorageChatId,
+          buffer,
+          filename: fileName,
+          thumbnailJpeg: thumb,
+        });
       }
     } catch (err) {
       await this.minio.deleteObject(objectKey).catch(() => undefined);
@@ -534,6 +606,7 @@ export class StorageService implements OnModuleInit {
   }
 
   async persistUploadedDocumentFromPath(
+    t: StorageTenant,
     folderId: string,
     fileName: string,
     mimeType: string,
@@ -541,7 +614,8 @@ export class StorageService implements OnModuleInit {
     size: number,
     opts: PersistUploadOptions = {},
   ): Promise<StoredFile> {
-    await this.ensureFolder(folderId);
+    assertTenantTelegramConfigured(t);
+    await this.ensureFolder(t, folderId);
     const dup = await this.fileRepo.findOne({
       where: { folderId, name: fileName, deletedAt: IsNull() },
     });
@@ -556,9 +630,9 @@ export class StorageService implements OnModuleInit {
         return StorageService.markSkippedDuplicate(existingImage);
       }
     }
-    const objectKey = this.shouldStoreInMinio(size) ? this.buildMinioObjectKey(fileName) : null;
+    const objectKey = this.shouldStoreInMinio(size) ? this.buildMinioObjectKey(t, fileName) : null;
     if (objectKey) {
-      await this.assertMinioCapacity(size);
+      await this.assertMinioCapacity(t, size);
     }
 
     let uploaded:
@@ -581,7 +655,13 @@ export class StorageService implements OnModuleInit {
       if (this.shouldStoreInTelegram(size)) {
         const buffer = await readFile(path);
         const thumb = await this.maybeThumbnail(buffer, mimeType);
-        uploaded = await this.telegram.uploadDocument(buffer, fileName, thumb);
+        uploaded = await telegramUploadDocument({
+          token: t.telegramBotToken,
+          chatId: t.telegramStorageChatId,
+          buffer,
+          filename: fileName,
+          thumbnailJpeg: thumb,
+        });
       }
     } catch (err) {
       await this.minio.deleteObject(objectKey).catch(() => undefined);
@@ -604,12 +684,14 @@ export class StorageService implements OnModuleInit {
     return this.saveFileEntityWithSuffixOnDuplicate(entity, folderId, fileName);
   }
 
-  async searchFiles(params: FileSearchParams): Promise<StoredFile[]> {
+  async searchFiles(t: StorageTenant, params: FileSearchParams): Promise<StoredFile[]> {
     const limit = Math.min(Math.max(params.limit, 1), 200);
     const qb = this.fileRepo
       .createQueryBuilder('f')
+      .innerJoin('f.folder', 'sf_folder')
       .leftJoinAndSelect('f.tags', 'tag')
       .where('f.deletedAt IS NULL')
+      .andWhere('sf_folder.accountId = :aid', { aid: t.accountId })
       .orderBy('f.name', TYPEORM_ORDER_ASC)
       .addOrderBy('f.id', TYPEORM_ORDER_ASC)
       .take(limit);
@@ -624,8 +706,8 @@ export class StorageService implements OnModuleInit {
     }
 
     if (params.folderId !== undefined && params.folderId !== '') {
-      const fid = this.resolveFolderId(params.folderId);
-      await this.ensureFolder(fid);
+      const fid = this.resolveFolderId(t, params.folderId);
+      await this.ensureFolder(t, fid);
       qb.andWhere('f.folderId = :fid', { fid });
     }
     if (params.mimeType?.trim()) {
@@ -664,16 +746,17 @@ export class StorageService implements OnModuleInit {
   }
 
   async patchFile(
+    t: StorageTenant,
     id: string,
     dto: { name?: string; folderId?: string },
     policy: DuplicateNamePolicy,
   ): Promise<StoredFile> {
-    const file = await this.getFile(id);
+    const file = await this.getFile(t, id);
 
     let targetFolderId = file.folderId;
     if (dto.folderId !== undefined) {
-      targetFolderId = dto.folderId;
-      await this.ensureFolder(targetFolderId);
+      targetFolderId = this.resolveFolderId(t, dto.folderId);
+      await this.ensureFolder(t, targetFolderId);
     }
 
     let targetName = dto.name ?? file.name;
@@ -705,39 +788,54 @@ export class StorageService implements OnModuleInit {
     return this.fileRepo.save(file);
   }
 
-  async getStorageQuotaStats(): Promise<StorageQuotaStats> {
+  async getStorageQuotaStats(t: StorageTenant): Promise<StorageQuotaStats> {
     const active = await this.fileRepo
       .createQueryBuilder('f')
+      .innerJoin('f.folder', 'qf')
       .select('COUNT(*)', 'files')
       .addSelect('COALESCE(SUM(f.size), 0)', 'bytes')
       .where('f.deletedAt IS NULL')
       .andWhere('f.telegramFileId IS NOT NULL')
+      .andWhere('qf.accountId = :aid', { aid: t.accountId })
       .getRawOne<{ files: string; bytes: string }>();
 
     const trashed = await this.fileRepo
       .createQueryBuilder('f')
+      .innerJoin('f.folder', 'qf2')
       .select('COUNT(*)', 'files')
       .addSelect('COALESCE(SUM(f.size), 0)', 'bytes')
       .where('f.deletedAt IS NOT NULL')
       .andWhere('f.telegramFileId IS NOT NULL')
+      .andWhere('qf2.accountId = :aid', { aid: t.accountId })
       .getRawOne<{ files: string; bytes: string }>();
 
     const byMimeTypeRaw = await this.fileRepo
       .createQueryBuilder('f')
+      .innerJoin('f.folder', 'qf3')
       .select('f.mimeType', 'mimeType')
       .addSelect('COUNT(*)', 'files')
       .addSelect('COALESCE(SUM(f.size), 0)', 'bytes')
       .where('f.deletedAt IS NULL')
       .andWhere('f.telegramFileId IS NOT NULL')
+      .andWhere('qf3.accountId = :aid', { aid: t.accountId })
       .groupBy('f.mimeType')
       .orderBy('bytes', 'DESC')
       .limit(50)
       .getRawMany<{ mimeType: string; files: string; bytes: string }>();
 
     const totalFolders = await this.folderRepo.count({
-      where: { id: Not(ROOT_FOLDER_ID), deletedAt: IsNull() },
+      where: {
+        id: Not(t.rootFolderId),
+        deletedAt: IsNull(),
+        accountId: t.accountId,
+      },
     });
-    const minioBytes = await this.minioUsedBytes();
+    const minioBytes = await this.minioUsedBytesForAccount(t.accountId);
+    const gb = Number(t.minioLimitGb);
+    const accountMinioLimitBytes = Math.floor(
+      Math.max(0, Number.isFinite(gb) ? gb : 0) * 1024 * 1024 * 1024,
+    );
+    const minioLimitBytes = accountMinioLimitBytes > 0 ? accountMinioLimitBytes : 0;
 
     return {
       totalFiles: Number(active?.files ?? 0),
@@ -746,7 +844,8 @@ export class StorageService implements OnModuleInit {
       trashedFiles: Number(trashed?.files ?? 0),
       trashedBytes: Number(trashed?.bytes ?? 0),
       minioBytes,
-      minioLimitBytes: this.minio.limitBytes(),
+      accountMinioLimitBytes,
+      minioLimitBytes,
       byMimeType: byMimeTypeRaw.map((row) => ({
         mimeType: row.mimeType,
         files: Number(row.files),
@@ -755,8 +854,8 @@ export class StorageService implements OnModuleInit {
     };
   }
 
-  async setFileTags(id: string, rawTags: string[]): Promise<StoredFile> {
-    const file = await this.getFile(id);
+  async setFileTags(t: StorageTenant, id: string, rawTags: string[]): Promise<StoredFile> {
+    const file = await this.getFile(t, id);
     const names = StorageService.normalizeTags(rawTags);
     const tags: FileTag[] = [];
     for (const name of names) {
@@ -770,13 +869,13 @@ export class StorageService implements OnModuleInit {
     return this.fileRepo.save(file);
   }
 
-  async getFileTags(id: string): Promise<string[]> {
-    const file = await this.getFile(id);
+  async getFileTags(t: StorageTenant, id: string): Promise<string[]> {
+    const file = await this.getFile(t, id);
     return StorageService.tagsToNames(file);
   }
 
-  async deleteFile(id: string): Promise<void> {
-    const f = await this.getFile(id);
+  async deleteFile(t: StorageTenant, id: string): Promise<void> {
+    const f = await this.getFile(t, id);
     f.deletedAt = new Date();
     f.deletedOriginalFolderId = f.folderId;
     f.deletedOriginalName = f.name;
@@ -784,30 +883,33 @@ export class StorageService implements OnModuleInit {
     await this.fileRepo.save(f);
   }
 
-  async listTrashedFiles(limit = 100): Promise<StoredFile[]> {
-    return this.fileRepo.find({
-      where: { deletedAt: Not(IsNull()) },
-      relations: { tags: true },
-      order: { deletedAt: 'DESC' },
-      take: Math.min(Math.max(limit, 1), 200),
-    });
+  async listTrashedFiles(t: StorageTenant, limit = 100): Promise<StoredFile[]> {
+    return this.fileRepo
+      .createQueryBuilder('f')
+      .innerJoin('f.folder', 'ltf')
+      .leftJoinAndSelect('f.tags', 'tag')
+      .where('f.deletedAt IS NOT NULL')
+      .andWhere('ltf.accountId = :aid', { aid: t.accountId })
+      .orderBy('f.deletedAt', 'DESC')
+      .take(Math.min(Math.max(limit, 1), 200))
+      .getMany();
   }
 
-  async listTrashedFolders(limit = 100): Promise<Folder[]> {
+  async listTrashedFolders(t: StorageTenant, limit = 100): Promise<Folder[]> {
     return this.folderRepo.find({
-      where: { deletedAt: Not(IsNull()) },
+      where: { deletedAt: Not(IsNull()), accountId: t.accountId },
       order: { deletedAt: 'DESC' },
       take: Math.min(Math.max(limit, 1), 200),
     });
   }
 
-  async listTrashFolderContents(folderId: string): Promise<{
+  async listTrashFolderContents(t: StorageTenant, folderId: string): Promise<{
     folderId: string;
     folders: Folder[];
     files: StoredFile[];
   }> {
     const folder = await this.folderRepo.findOne({ where: { id: folderId } });
-    if (!folder || !(await this.isFolderInTrashBranch(folder))) {
+    if (!folder || !(await this.isFolderInTrashBranch(t, folder))) {
       throw new NotFoundException(StorageExceptionMessage.FOLDER_NOT_FOUND);
     }
 
@@ -826,16 +928,18 @@ export class StorageService implements OnModuleInit {
     return {
       folderId,
       folders,
-      files: this.decorateFilesForClient(files),
+      files: this.decorateFilesForClient(files, t.telegramStorageChatId),
     };
   }
 
-  async restoreFile(id: string, policy: DuplicateNamePolicy): Promise<StoredFile> {
-    const file = await this.getTrashedFile(id);
+  async restoreFile(t: StorageTenant, id: string, policy: DuplicateNamePolicy): Promise<StoredFile> {
+    const file = await this.getTrashedFile(t, id);
     let targetFolderId = file.deletedOriginalFolderId ?? file.folderId;
-    const targetFolderExists = await this.folderRepo.exist({ where: { id: targetFolderId } });
+    const targetFolderExists = await this.folderRepo.exist({
+      where: { id: targetFolderId, deletedAt: IsNull(), accountId: t.accountId },
+    });
     if (!targetFolderExists) {
-      targetFolderId = ROOT_FOLDER_ID;
+      targetFolderId = t.rootFolderId;
     }
     let targetName = file.deletedOriginalName ?? file.name;
     const dup = await this.fileRepo.findOne({
@@ -860,19 +964,19 @@ export class StorageService implements OnModuleInit {
     return this.saveFileEntityWithSuffixOnDuplicate(file, targetFolderId, targetName);
   }
 
-  async permanentlyDeleteFile(id: string): Promise<void> {
-    const file = await this.getTrashedFile(id);
+  async permanentlyDeleteFile(t: StorageTenant, id: string): Promise<void> {
+    const file = await this.getTrashedFile(t, id);
     await this.removeFileFromDbAndTelegram(file);
   }
 
-  async restoreFolder(id: string): Promise<Folder> {
-    const folder = await this.getTrashedFolder(id);
-    let targetParentId = folder.deletedOriginalParentId ?? ROOT_FOLDER_ID;
+  async restoreFolder(t: StorageTenant, id: string): Promise<Folder> {
+    const folder = await this.getTrashedFolder(t, id);
+    let targetParentId = folder.deletedOriginalParentId ?? t.rootFolderId;
     const targetParentExists = await this.folderRepo.exist({
-      where: { id: targetParentId, deletedAt: IsNull() },
+      where: { id: targetParentId, deletedAt: IsNull(), accountId: t.accountId },
     });
     if (!targetParentExists) {
-      targetParentId = ROOT_FOLDER_ID;
+      targetParentId = t.rootFolderId;
     }
     folder.parentId = targetParentId;
     folder.name = await this.allocateFolderSuffixName(
@@ -885,45 +989,54 @@ export class StorageService implements OnModuleInit {
     return this.folderRepo.save(folder);
   }
 
-  async permanentlyDeleteFolder(id: string): Promise<void> {
-    const folder = await this.getTrashedFolder(id);
+  async permanentlyDeleteFolder(t: StorageTenant, id: string): Promise<void> {
+    const folder = await this.getTrashedFolder(t, id);
     await this.hardDeleteFolderBranch(folder.id);
   }
 
-  async emptyTrash(): Promise<void> {
-    const files = await this.fileRepo.find({ where: { deletedAt: Not(IsNull()) } });
+  async emptyTrash(t: StorageTenant): Promise<void> {
+    const files = await this.fileRepo
+      .createQueryBuilder('f')
+      .innerJoin('f.folder', 'etf')
+      .where('f.deletedAt IS NOT NULL')
+      .andWhere('etf.accountId = :aid', { aid: t.accountId })
+      .getMany();
     for (const file of files) {
       await this.removeFileFromDbAndTelegram(file);
     }
-    const folders = await this.folderRepo.find({ where: { deletedAt: Not(IsNull()) } });
+    const folders = await this.folderRepo.find({
+      where: { deletedAt: Not(IsNull()), accountId: t.accountId },
+    });
     for (const folder of folders) {
       await this.hardDeleteFolderBranch(folder.id);
     }
   }
 
-  async deleteFolder(folderId: string): Promise<void> {
-    if (folderId === ROOT_FOLDER_ID) {
+  async deleteFolder(t: StorageTenant, folderIdParam: string): Promise<void> {
+    const folderId = this.resolveFolderId(t, folderIdParam);
+    if (folderId === t.rootFolderId) {
       throw new BadRequestException(
         StorageExceptionMessage.ROOT_FOLDER_DELETE_FORBIDDEN,
       );
     }
-    const folder = await this.ensureFolder(folderId);
+    const folder = await this.ensureFolder(t, folderId);
     folder.deletedAt = new Date();
     folder.deletedOriginalParentId = folder.parentId;
     folder.deletedOriginalName = folder.name;
-    folder.parentId = ROOT_FOLDER_ID;
+    folder.parentId = t.rootFolderId;
     folder.name = this.buildTrashFolderName(folder);
     await this.folderRepo.save(folder);
   }
 
   private async removeFileFromDbAndTelegram(f: StoredFile): Promise<void> {
+    const t = await this.resolveTenantForFolder(f.folderId);
     const msgId = f.telegramMessageId;
     if (msgId != null && msgId !== '') {
       const cnt = await this.fileRepo.count({
         where: { telegramMessageId: msgId },
       });
       if (cnt <= 1) {
-        await this.telegram.deleteChatMessage(msgId);
+        await telegramDeleteChatMessage(t.telegramBotToken, t.telegramStorageChatId, msgId);
       }
     }
     const objectKey = f.s3ObjectKey;
@@ -938,19 +1051,19 @@ export class StorageService implements OnModuleInit {
     await this.fileRepo.remove(f);
   }
 
-  async getFile(id: string): Promise<StoredFile> {
+  async getFile(t: StorageTenant, id: string): Promise<StoredFile> {
     const file = await this.fileRepo.findOne({
       where: { id, deletedAt: IsNull() },
-      relations: { tags: true },
+      relations: { tags: true, folder: true },
     });
-    if (!file) {
+    if (!file?.folder || file.folder.accountId !== t.accountId) {
       throw new NotFoundException(StorageExceptionMessage.FILE_NOT_FOUND);
     }
     return file;
   }
 
-  async getFileForRead(id: string, includeTrashed = false): Promise<StoredFile> {
-    return includeTrashed ? this.getTrashedFile(id) : this.getFile(id);
+  async getFileForRead(t: StorageTenant, id: string, includeTrashed = false): Promise<StoredFile> {
+    return includeTrashed ? this.getTrashedFile(t, id) : this.getFile(t, id);
   }
 
   async findActiveFileByName(folderId: string, name: string): Promise<StoredFile | null> {
@@ -960,7 +1073,8 @@ export class StorageService implements OnModuleInit {
     });
   }
 
-  async allocateFileSuffixName(folderId: string, desiredName: string): Promise<string> {
+  async allocateFileSuffixName(t: StorageTenant, folderId: string, desiredName: string): Promise<string> {
+    await this.ensureFolder(t, folderId);
     return this.allocateSuffixName(folderId, desiredName);
   }
 
@@ -1020,35 +1134,38 @@ export class StorageService implements OnModuleInit {
     return file;
   }
 
-  private async getTrashedFile(id: string): Promise<StoredFile> {
+  private async getTrashedFile(t: StorageTenant, id: string): Promise<StoredFile> {
     const file = await this.fileRepo.findOne({
       where: { id, deletedAt: Not(IsNull()) },
-      relations: { tags: true },
+      relations: { tags: true, folder: true },
     });
-    if (!file) {
+    if (!file?.folder || file.folder.accountId !== t.accountId) {
       throw new NotFoundException(StorageExceptionMessage.FILE_NOT_FOUND);
     }
     return file;
   }
 
-  private async getTrashedFolder(id: string): Promise<Folder> {
+  private async getTrashedFolder(t: StorageTenant, id: string): Promise<Folder> {
     const folder = await this.folderRepo.findOne({
       where: { id, deletedAt: Not(IsNull()) },
     });
-    if (!folder) {
+    if (!folder || folder.accountId !== t.accountId) {
       throw new NotFoundException(StorageExceptionMessage.FOLDER_NOT_FOUND);
     }
     return folder;
   }
 
-  private async isFolderInTrashBranch(folder: Folder): Promise<boolean> {
+  private async isFolderInTrashBranch(t: StorageTenant, folder: Folder): Promise<boolean> {
     let current: Folder | null = folder;
     const visited = new Set<string>();
     while (current) {
+      if (current.accountId !== t.accountId) {
+        return false;
+      }
       if (current.deletedAt) {
         return true;
       }
-      if (!current.parentId || current.parentId === ROOT_FOLDER_ID || visited.has(current.parentId)) {
+      if (!current.parentId || current.parentId === t.rootFolderId || visited.has(current.parentId)) {
         return false;
       }
       visited.add(current.parentId);
@@ -1092,7 +1209,8 @@ export class StorageService implements OnModuleInit {
     disposition: (typeof ContentDispositionMode)[keyof typeof ContentDispositionMode],
     opts: { includeTrashed?: boolean } = {},
   ): Promise<void> {
-    const f = await this.getFileForRead(storedFileId, opts.includeTrashed);
+    const t = await this.resolveTenantForFile(storedFileId);
+    const f = await this.getFileForRead(t, storedFileId, opts.includeTrashed);
     if (f.s3ObjectKey) {
       try {
         const object = await this.minio.getObject(f.s3ObjectKey);
@@ -1118,10 +1236,10 @@ export class StorageService implements OnModuleInit {
     }
     let r: globalThis.Response;
     try {
-      r = await this.fetchTelegramFileResponse(f.telegramFileId);
+      r = await this.fetchTelegramFileResponse(t, f.telegramFileId);
     } catch (err) {
       if (StorageService.isTelegramFileTooBigError(err)) {
-        const url = StorageService.telegramMessageUrl(f.telegramMessageId);
+        const url = telegramPublicMessageUrl(f.telegramMessageId, t.telegramStorageChatId);
         if (url) {
           res.redirect(url);
           return;
@@ -1141,15 +1259,11 @@ export class StorageService implements OnModuleInit {
     Readable.fromWeb(r.body as import('stream/web').ReadableStream).pipe(res);
   }
 
-  async getDownloadUrl(fileId: string): Promise<string> {
-    return this.telegram.getFileDownloadUrl(fileId);
-  }
-
-  async fetchTelegramFileResponse(fileId: string): Promise<globalThis.Response> {
+  async fetchTelegramFileResponse(t: StorageTenant, fileId: string): Promise<globalThis.Response> {
     let lastError: unknown;
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
-        const url = await this.getDownloadUrl(fileId);
+        const url = await telegramGetFileDownloadUrl(t.telegramBotToken, fileId);
         const response = await StorageService.fetchTelegramUrl(url);
         if (response.ok && response.body) {
           return response;
@@ -1167,12 +1281,15 @@ export class StorageService implements OnModuleInit {
   }
 
   /** Chuẩn bị danh sách entry ZIP + tên file — dùng sync stream và worker folder-zip. */
-  async prepareFolderZipArchive(folderIdParam: string): Promise<{
+  async prepareFolderZipArchive(
+    t: StorageTenant,
+    folderIdParam: string,
+  ): Promise<{
     entries: Array<{ zipPath: string; telegramFileId: string | null; s3ObjectKey: string | null }>;
     zipBaseName: string;
   }> {
-    const folderId = this.resolveFolderId(folderIdParam);
-    const folder = await this.ensureFolder(folderId);
+    const folderId = this.resolveFolderId(t, folderIdParam);
+    const folder = await this.ensureFolder(t, folderId);
     const maxFiles = this.readFolderZipMaxFilesCap();
     const entries = await this.collectDescendantFilesForZip(folderId, '');
     if (entries.length > maxFiles) {
@@ -1184,12 +1301,13 @@ export class StorageService implements OnModuleInit {
     }
     return {
       entries,
-      zipBaseName: StorageService.zipArchiveBasename(folder),
+      zipBaseName: StorageService.zipArchiveBasename(folder, t.rootFolderId),
     };
   }
 
   /** Ghi ZIP ra đĩa (worker queue). */
   async writeFolderZipToDisk(
+    t: StorageTenant,
     entries: Array<{ zipPath: string; telegramFileId: string | null; s3ObjectKey: string | null }>,
     zipBaseName: string,
     absoluteZipPath: string,
@@ -1205,7 +1323,7 @@ export class StorageService implements OnModuleInit {
           const object = await this.minio.getObject(e.s3ObjectKey);
           archive.append(object.body, { name: e.zipPath });
         } else if (e.telegramFileId) {
-          const r = await this.fetchTelegramFileResponse(e.telegramFileId);
+          const r = await this.fetchTelegramFileResponse(t, e.telegramFileId);
           archive.append(Readable.fromWeb(r.body as import('stream/web').ReadableStream), {
             name: e.zipPath,
           });
@@ -1246,8 +1364,8 @@ export class StorageService implements OnModuleInit {
   }
 
   /** Tải cả cây thư mục dưới dạng ZIP (đệ quy). Tuần tự từ Telegram — có thể chậm với nhiều file. */
-  async streamFolderZipToResponse(folderIdParam: string, res: Response): Promise<void> {
-    const { entries, zipBaseName } = await this.prepareFolderZipArchive(folderIdParam);
+  async streamFolderZipToResponse(t: StorageTenant, folderIdParam: string, res: Response): Promise<void> {
+    const { entries, zipBaseName } = await this.prepareFolderZipArchive(t, folderIdParam);
 
     res.setHeader(HttpHeader.CONTENT_TYPE, MimeType.APPLICATION_ZIP);
     res.setHeader(
@@ -1267,7 +1385,7 @@ export class StorageService implements OnModuleInit {
               const object = await this.minio.getObject(e.s3ObjectKey);
               archive.append(object.body, { name: e.zipPath });
             } else if (e.telegramFileId) {
-              const r = await this.fetchTelegramFileResponse(e.telegramFileId);
+              const r = await this.fetchTelegramFileResponse(t, e.telegramFileId);
               archive.append(Readable.fromWeb(r.body as import('stream/web').ReadableStream), {
                 name: e.zipPath,
               });
@@ -1284,32 +1402,43 @@ export class StorageService implements OnModuleInit {
   }
 
   async copyFolderBranch(
+    t: StorageTenant,
     sourceFolderId: string,
     targetParentIdParam: string | undefined,
   ): Promise<Folder> {
-    if (sourceFolderId === ROOT_FOLDER_ID) {
+    const resolvedSource = this.resolveFolderId(t, sourceFolderId);
+    if (resolvedSource === t.rootFolderId) {
       throw new BadRequestException(ApiExceptionMessage.FOLDER_COPY_ROOT_FORBIDDEN);
     }
-    const src = await this.ensureFolder(sourceFolderId);
+    const src = await this.ensureFolder(t, resolvedSource);
     const targetParentId = targetParentIdParam
-      ? this.resolveFolderId(targetParentIdParam)
-      : ROOT_FOLDER_ID;
-    await this.ensureFolder(targetParentId);
-    await this.assertTargetParentOutsideSourceSubtree(sourceFolderId, targetParentId);
+      ? this.resolveFolderId(t, targetParentIdParam)
+      : t.rootFolderId;
+    await this.ensureFolder(t, targetParentId);
+    await this.assertTargetParentOutsideSourceSubtree(resolvedSource, targetParentId);
 
     const sibling = await this.folderRepo.findOne({
-      where: { parentId: targetParentId, name: src.name },
+      where: {
+        accountId: t.accountId,
+        parentId: targetParentId,
+        name: src.name,
+        deletedAt: IsNull(),
+      },
     });
     if (sibling) {
       throw new ConflictException(StorageExceptionMessage.FOLDER_DUPLICATE_NAME);
     }
 
     const rootCopy = await this.folderRepo.save(
-      this.folderRepo.create({ parentId: targetParentId, name: src.name }),
+      this.folderRepo.create({
+        parentId: targetParentId,
+        name: src.name,
+        accountId: t.accountId,
+      }),
     );
 
     const queue: Array<{ srcId: string; dstId: string }> = [
-      { srcId: sourceFolderId, dstId: rootCopy.id },
+      { srcId: resolvedSource, dstId: rootCopy.id },
     ];
 
     while (queue.length > 0) {
@@ -1347,13 +1476,18 @@ export class StorageService implements OnModuleInit {
       });
       for (const sub of subs) {
         const clash = await this.folderRepo.findOne({
-          where: { parentId: dstId, name: sub.name },
+          where: {
+            accountId: t.accountId,
+            parentId: dstId,
+            name: sub.name,
+            deletedAt: IsNull(),
+          },
         });
         if (clash) {
           throw new ConflictException(StorageExceptionMessage.FOLDER_DUPLICATE_NAME);
         }
         const nf = await this.folderRepo.save(
-          this.folderRepo.create({ parentId: dstId, name: sub.name }),
+          this.folderRepo.create({ parentId: dstId, name: sub.name, accountId: t.accountId }),
         );
         queue.push({ srcId: sub.id, dstId: nf.id });
       }
@@ -1362,20 +1496,26 @@ export class StorageService implements OnModuleInit {
     return rootCopy;
   }
 
-  async moveFolder(folderId: string, targetParentIdParam: string): Promise<Folder> {
-    if (folderId === ROOT_FOLDER_ID) {
+  async moveFolder(t: StorageTenant, folderIdParam: string, targetParentIdParam: string): Promise<Folder> {
+    const folderId = this.resolveFolderId(t, folderIdParam);
+    if (folderId === t.rootFolderId) {
       throw new BadRequestException(StorageExceptionMessage.ROOT_FOLDER_DELETE_FORBIDDEN);
     }
-    const folder = await this.ensureFolder(folderId);
-    const targetParentId = this.resolveFolderId(targetParentIdParam);
+    const folder = await this.ensureFolder(t, folderId);
+    const targetParentId = this.resolveFolderId(t, targetParentIdParam);
     if (targetParentId === folder.parentId) {
       return folder;
     }
-    await this.ensureFolder(targetParentId);
+    await this.ensureFolder(t, targetParentId);
     await this.assertTargetParentOutsideSourceSubtree(folderId, targetParentId);
 
     const sibling = await this.folderRepo.findOne({
-      where: { parentId: targetParentId, name: folder.name },
+      where: {
+        accountId: t.accountId,
+        parentId: targetParentId,
+        name: folder.name,
+        deletedAt: IsNull(),
+      },
     });
     if (sibling && sibling.id !== folder.id) {
       throw new ConflictException(StorageExceptionMessage.FOLDER_DUPLICATE_NAME);
@@ -1443,8 +1583,9 @@ export class StorageService implements OnModuleInit {
     for (const group of groups) {
       const [, ...duplicates] = group.files;
       for (const duplicate of duplicates) {
-        await this.deleteFile(duplicate.id);
-        const trashed = await this.getTrashedFile(duplicate.id);
+        const td = await this.resolveTenantForFile(duplicate.id);
+        await this.deleteFile(td, duplicate.id);
+        const trashed = await this.getTrashedFile(td, duplicate.id);
         deletedFiles.push(trashed);
       }
     }
@@ -1455,7 +1596,10 @@ export class StorageService implements OnModuleInit {
     };
   }
 
-  async getFilesMetaBatch(ids: string[]): Promise<
+  async getFilesMetaBatch(
+    t: StorageTenant,
+    ids: string[],
+  ): Promise<
     Array<{
       id: string;
       name: string;
@@ -1474,10 +1618,14 @@ export class StorageService implements OnModuleInit {
     if (uniq.length === 0) {
       return [];
     }
-    const files = await this.fileRepo.find({
-      where: { id: In(uniq), deletedAt: IsNull() },
-      relations: { tags: true },
-    });
+    const files = await this.fileRepo
+      .createQueryBuilder('f')
+      .innerJoin('f.folder', 'mf')
+      .leftJoinAndSelect('f.tags', 'tag')
+      .where('f.id IN (:...ids)', { ids: uniq })
+      .andWhere('f.deletedAt IS NULL')
+      .andWhere('mf.accountId = :aid', { aid: t.accountId })
+      .getMany();
     const map = new Map(files.map((f) => [f.id, f]));
     return uniq
       .map((id) => map.get(id))
@@ -1494,17 +1642,20 @@ export class StorageService implements OnModuleInit {
       }));
   }
 
-  async ingestInboundTelegramDocument(params: {
-    messageId: number;
-    document: {
-      file_id: string;
-      file_unique_id: string;
-      file_name?: string;
-      mime_type?: string;
-      file_size?: number;
-    };
-    thumbnailFileId: string | null;
-  }): Promise<StoredFile | null> {
+  async ingestInboundTelegramDocument(
+    t: StorageTenant,
+    params: {
+      messageId: number;
+      document: {
+        file_id: string;
+        file_unique_id: string;
+        file_name?: string;
+        mime_type?: string;
+        file_size?: number;
+      };
+      thumbnailFileId: string | null;
+    },
+  ): Promise<StoredFile | null> {
     const mid = String(params.messageId);
     const existing = await this.fileRepo.findOne({
       where: { telegramMessageId: mid, deletedAt: IsNull() },
@@ -1513,11 +1664,9 @@ export class StorageService implements OnModuleInit {
       return null;
     }
 
-    const syncFolderRaw = this.config.get<string>(EnvKey.TELEGRAM_SYNC_FOLDER_ID)?.trim();
-    const folderId = syncFolderRaw
-      ? this.resolveFolderId(syncFolderRaw)
-      : ROOT_FOLDER_ID;
-    await this.ensureFolder(folderId);
+    const syncFolderRaw = this.runtime.effectiveTrimmed(EnvKey.TELEGRAM_SYNC_FOLDER_ID);
+    const folderId = syncFolderRaw ? this.resolveFolderId(t, syncFolderRaw) : t.rootFolderId;
+    await this.ensureFolder(t, folderId);
 
     const baseName =
       params.document.file_name?.trim() ||
@@ -1572,7 +1721,7 @@ export class StorageService implements OnModuleInit {
   }
 
   private readFolderZipMaxFilesCap(): number {
-    const raw = this.config.get<string>(EnvKey.FOLDER_ZIP_MAX_FILES)?.trim();
+    const raw = this.runtime.effectiveRaw(EnvKey.FOLDER_ZIP_MAX_FILES)?.trim();
     const n = raw !== undefined && raw !== '' ? Number(raw) : NaN;
     if (!Number.isFinite(n) || n < 1) {
       return 2000;
@@ -1639,12 +1788,14 @@ export class StorageService implements OnModuleInit {
     return (file.tags ?? []).map((tag) => tag.name).sort((a, b) => a.localeCompare(b));
   }
 
-  private decorateFilesForClient(files: StoredFile[]): StoredFile[] {
+  private decorateFilesForClient(files: StoredFile[], telegramStorageChatId: string): StoredFile[] {
     return files.map((file) => {
       Object.assign(file, {
         tags: StorageService.tagsToNames(file),
-        canDirectDownload: !!file.s3ObjectKey || (!!file.telegramFileId && file.size <= telegramDownloadMaxBytes()),
-        telegramMessageUrl: StorageService.telegramMessageUrl(file.telegramMessageId),
+        canDirectDownload:
+          !!file.s3ObjectKey ||
+          (!!file.telegramFileId && file.size <= this.runtime.telegramDownloadMaxBytes()),
+        telegramMessageUrl: telegramPublicMessageUrl(file.telegramMessageId, telegramStorageChatId),
       });
       return file;
     });
@@ -1720,25 +1871,9 @@ export class StorageService implements OnModuleInit {
     return raw.includes('file is too big');
   }
 
-  private static telegramMessageUrl(messageId: string | null | undefined): string | undefined {
-    if (!messageId) {
-      return undefined;
-    }
-    const chat = process.env[EnvKey.TELEGRAM_STORAGE_CHAT_ID]?.trim();
-    if (!chat) {
-      return undefined;
-    }
-    if (chat.startsWith('@')) {
-      return `https://t.me/${chat.slice(1)}/${messageId}`;
-    }
-    if (chat.startsWith('-100')) {
-      return `https://t.me/c/${chat.slice(4)}/${messageId}`;
-    }
-    return undefined;
-  }
-
-  private static zipArchiveBasename(folder: Folder): string {
-    const raw = folder.id === ROOT_FOLDER_ID ? StorageService.dateStampedDataName() : folder.name;
+  private static zipArchiveBasename(folder: Folder, tenantRootFolderId: string): string {
+    const raw =
+      folder.id === tenantRootFolderId ? StorageService.dateStampedDataName() : folder.name;
     const base = StorageService.sanitizeZipPathSegment(raw).replace(/\./g, '_');
     return base || 'folder';
   }

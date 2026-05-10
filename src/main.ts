@@ -9,17 +9,6 @@ import { EnvKey } from "./common/env-keys";
 import { ProcessLifecycleSignal } from "./common/http.constants";
 import { setupSwagger } from "./swagger.setup";
 
-function assertBasicAuthEnv(config: ConfigService): void {
-  const user = config.get<string>(EnvKey.API_BASIC_AUTH_USER)?.trim();
-  const pass = config.get<string>(EnvKey.API_BASIC_AUTH_PASSWORD)?.trim();
-  if (!user) {
-    throw new Error(ApiExceptionMessage.MISSING_BASIC_AUTH_USER);
-  }
-  if (!pass) {
-    throw new Error(ApiExceptionMessage.MISSING_BASIC_AUTH_PASSWORD);
-  }
-}
-
 function assertDownloadShareSecret(config: ConfigService): void {
   const secret = config.get<string>(EnvKey.DOWNLOAD_SHARE_SECRET)?.trim();
   if (!secret || secret.length < 16) {
@@ -31,7 +20,6 @@ async function bootstrap() {
   const app = await NestFactory.create<NestExpressApplication>(AppModule);
   const config = app.get(ConfigService);
 
-  assertBasicAuthEnv(config);
   assertDownloadShareSecret(config);
 
   app.enableShutdownHooks();

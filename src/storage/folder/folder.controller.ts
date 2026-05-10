@@ -36,6 +36,8 @@ import {
 import { Queue } from 'bullmq';
 import type { Response } from 'express';
 import { validate as isUuid } from 'uuid';
+import type { Account } from '../../accounts/account.entity';
+import { CurrentAccount } from '../../accounts/current-account.decorator';
 import { Public } from '../../auth/public.decorator';
 import { ApiExceptionMessage } from '../../common/api-messages';
 import { API_V1_PREFIX } from '../../common/api-route';
@@ -54,7 +56,10 @@ import {
   FOLDER_ZIP_JOB_NAME,
   FOLDER_ZIP_QUEUE,
 } from '../queue/folder-zip.constants';
-import type { FolderZipJobResult } from '../queue/folder-zip.processor';
+import type {
+  FolderZipJobData,
+  FolderZipJobResult,
+} from '../queue/folder-zip.processor';
 import { BullMqJobState } from '../queue/file-upload.constants';
 import { FolderZipDownloadTokenService } from '../share/folder-zip-download-token.service';
 import {
@@ -73,14 +78,21 @@ export class FolderController {
     private readonly storage: StorageService,
     private readonly folderZipToken: FolderZipDownloadTokenService,
     @InjectQueue(FOLDER_ZIP_QUEUE)
-    private readonly folderZipQueue: Queue<{ folderIdParam: string }>,
+    private readonly folderZipQueue: Queue<FolderZipJobData>,
   ) {}
+
+  private tenant(acc: Account) {
+    return this.storage.storageTenantFromAccountEntity(acc);
+  }
 
   @Post()
   @ApiOperation({ summary: 'Tạo thư mục trong cha (mặc định gốc)' })
   @ApiCreatedResponse({ type: FolderResponseDto })
-  create(@Body(ValidationPipe) dto: CreateFolderDto) {
-    return this.storage.createFolder(dto);
+  create(
+    @CurrentAccount() account: Account,
+    @Body(ValidationPipe) dto: CreateFolderDto,
+  ) {
+    return this.storage.createFolder(this.tenant(account), dto);
   }
 
   @Post(FolderRoutePath.COPY_FOLDER_PATH)
@@ -97,10 +109,15 @@ export class FolderController {
   @ApiConflictResponse({ description: 'Trùng tên thư mục con ở đích' })
   @ApiNotFoundResponse({ description: 'Không tìm thấy thư mục' })
   async copyFolder(
+    @CurrentAccount() account: Account,
     @Param(FolderRoutePath.PARAM_FOLDER_ID, ParseUUIDPipe) sourceFolderId: string,
     @Body(ValidationPipe) body: CopyFolderDto,
   ): Promise<FolderResponseDto> {
-    const folder = await this.storage.copyFolderBranch(sourceFolderId, body.parentId);
+    const folder = await this.storage.copyFolderBranch(
+      this.tenant(account),
+      sourceFolderId,
+      body.parentId,
+    );
     return {
       id: folder.id,
       parentId: folder.parentId,
@@ -205,13 +222,14 @@ export class FolderController {
   @ApiNotFoundResponse({ description: 'Không tìm thấy thư mục' })
   @ApiBadGatewayResponse({ description: 'Không tải được ít nhất một file từ Telegram' })
   async downloadFolderZip(
+    @CurrentAccount() account: Account,
     @Param(FolderRoutePath.PARAM_FOLDER_ID) folderId: string,
     @Res({ passthrough: false }) res: Response,
   ): Promise<void> {
     if (folderId !== ROOT_FOLDER_ALIAS && !isUuid(folderId)) {
       throw new BadRequestException(ApiExceptionMessage.FOLDER_ID_INVALID);
     }
-    await this.storage.streamFolderZipToResponse(folderId, res);
+    await this.storage.streamFolderZipToResponse(this.tenant(account), folderId, res);
   }
 
   @Post(FolderRoutePath.DOWNLOAD_ZIP_ASYNC_PATH)
@@ -232,12 +250,14 @@ export class FolderController {
   @ApiAcceptedResponse({ type: FolderZipJobQueuedDto })
   @ApiBadRequestResponse({ description: 'folderId không hợp lệ' })
   async enqueueFolderZip(
+    @CurrentAccount() account: Account,
     @Param(FolderRoutePath.PARAM_FOLDER_ID) folderId: string,
   ): Promise<FolderZipJobQueuedDto> {
     if (folderId !== ROOT_FOLDER_ALIAS && !isUuid(folderId)) {
       throw new BadRequestException(ApiExceptionMessage.FOLDER_ID_INVALID);
     }
     const job = await this.folderZipQueue.add(FOLDER_ZIP_JOB_NAME, {
+      tenant: this.tenant(account),
       folderIdParam: folderId,
     });
     if (job.id === undefined) {
@@ -260,12 +280,14 @@ export class FolderController {
   @ApiOkResponse({ type: FolderZipAutoResponseDto })
   @ApiBadRequestResponse({ description: 'folderId không hợp lệ' })
   async autoFolderZip(
+    @CurrentAccount() account: Account,
     @Param(FolderRoutePath.PARAM_FOLDER_ID) folderId: string,
   ): Promise<FolderZipAutoResponseDto> {
     if (folderId !== ROOT_FOLDER_ALIAS && !isUuid(folderId)) {
       throw new BadRequestException(ApiExceptionMessage.FOLDER_ID_INVALID);
     }
-    const archive = await this.storage.prepareFolderZipArchive(folderId);
+    const t = this.tenant(account);
+    const archive = await this.storage.prepareFolderZipArchive(t, folderId);
     if (archive.entries.length <= FOLDER_ZIP_DIRECT_MAX_FILES) {
       return {
         mode: 'direct',
@@ -275,6 +297,7 @@ export class FolderController {
       };
     }
     const job = await this.folderZipQueue.add(FOLDER_ZIP_JOB_NAME, {
+      tenant: t,
       folderIdParam: folderId,
     });
     if (job.id === undefined) {
@@ -330,6 +353,7 @@ export class FolderController {
   @ApiOkResponse({ type: FolderContentsResponseDto })
   @ApiBadRequestResponse({ description: 'folderId không phải root hoặc UUID' })
   listContents(
+    @CurrentAccount() account: Account,
     @Param(FolderRoutePath.PARAM_FOLDER_ID) folderId: string,
     @Query() query: FolderContentsQueryDto,
   ) {
@@ -342,7 +366,7 @@ export class FolderController {
     if (query.folderCursor && query.folderLimit === undefined) {
       throw new BadRequestException(ApiExceptionMessage.FOLDER_CURSOR_REQUIRES_LIMIT);
     }
-    return this.storage.listContents(folderId, {
+    return this.storage.listContents(this.tenant(account), folderId, {
       fileLimit: query.fileLimit,
       fileCursor: query.fileCursor,
       folderLimit: query.folderLimit,
@@ -358,6 +382,7 @@ export class FolderController {
   @ApiConflictResponse({ description: 'Trùng tên thư mục ở đích' })
   @ApiNotFoundResponse({ description: 'Không tìm thấy thư mục' })
   async patchFolder(
+    @CurrentAccount() account: Account,
     @Param(FolderRoutePath.PARAM_FOLDER_ID, ParseUUIDPipe) folderId: string,
     @Body(ValidationPipe) body: PatchFolderDto,
   ): Promise<FolderResponseDto> {
@@ -367,7 +392,7 @@ export class FolderController {
     if (body.parentId !== ROOT_FOLDER_ALIAS && !isUuid(body.parentId)) {
       throw new BadRequestException(ApiExceptionMessage.FOLDER_ID_INVALID);
     }
-    const folder = await this.storage.moveFolder(folderId, body.parentId);
+    const folder = await this.storage.moveFolder(this.tenant(account), folderId, body.parentId);
     return {
       id: folder.id,
       parentId: folder.parentId,
@@ -388,7 +413,10 @@ export class FolderController {
   @ApiNoContentResponse()
   @ApiBadRequestResponse({ description: 'Thư mục gốc không được xóa' })
   @ApiNotFoundResponse({ description: 'Không tìm thấy thư mục' })
-  async remove(@Param(FolderRoutePath.PARAM_FOLDER_ID, ParseUUIDPipe) folderId: string) {
-    await this.storage.deleteFolder(folderId);
+  async remove(
+    @CurrentAccount() account: Account,
+    @Param(FolderRoutePath.PARAM_FOLDER_ID, ParseUUIDPipe) folderId: string,
+  ) {
+    await this.storage.deleteFolder(this.tenant(account), folderId);
   }
 }

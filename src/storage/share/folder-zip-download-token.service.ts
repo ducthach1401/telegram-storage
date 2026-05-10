@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { createHmac, timingSafeEqual } from 'crypto';
 import { ApiExceptionMessage } from '../../common/api-messages';
 import { EnvKey } from '../../common/env-keys';
+import { RuntimeConfigService } from '../../settings/runtime-config.service';
 
 interface TokenPayload {
   jid: string;
@@ -11,11 +12,16 @@ interface TokenPayload {
 
 @Injectable()
 export class FolderZipDownloadTokenService {
-  constructor(private readonly config: ConfigService) {}
+  constructor(
+    private readonly config: ConfigService,
+    private readonly runtime: RuntimeConfigService,
+  ) {}
 
   create(jobId: string): { token: string; expiresAt: Date } {
     const secret = this.config.getOrThrow<string>(EnvKey.DOWNLOAD_SHARE_SECRET);
-    const ttlRaw = this.config.get<string>(EnvKey.FOLDER_ZIP_DOWNLOAD_TOKEN_TTL_SECONDS)?.trim();
+    const ttlRaw = this.runtime
+      .effectiveRaw(EnvKey.FOLDER_ZIP_DOWNLOAD_TOKEN_TTL_SECONDS)
+      ?.trim();
     const ttl = Math.min(
       Math.max(Number(ttlRaw !== '' && ttlRaw !== undefined ? ttlRaw : 3600) || 3600, 60),
       604800,

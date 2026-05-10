@@ -1,7 +1,5 @@
 /** Thông báo exception / bootstrap — tách khỏi logic để không lặp literal. */
 
-import { EnvKey } from './env-keys';
-
 export const ApiExceptionMessage = {
   MISSING_DOWNLOAD_SHARE_SECRET:
     'Thiếu hoặc rỗng DOWNLOAD_SHARE_SECRET — cần secret để ký link tải chia sẻ',
@@ -30,8 +28,6 @@ export const ApiExceptionMessage = {
   TELEGRAM_FILE_DOWNLOAD_FAILED: 'Không tải được file từ Telegram',
   FOLDER_ID_INVALID: 'folderId phải là "root" hoặc UUID hợp lệ',
   BASIC_AUTH_REQUIRED: 'Yêu cầu Basic Authorization',
-  MISSING_BASIC_AUTH_USER: `Thiếu hoặc rỗng ${EnvKey.API_BASIC_AUTH_USER} — xem .env.example và file .env`,
-  MISSING_BASIC_AUTH_PASSWORD: `Thiếu hoặc rỗng ${EnvKey.API_BASIC_AUTH_PASSWORD} — xem .env.example và file .env`,
 } as const;
 
 export const StorageExceptionMessage = {

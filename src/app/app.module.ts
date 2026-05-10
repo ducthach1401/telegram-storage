@@ -7,6 +7,8 @@ import { ThrottlerModule } from "@nestjs/throttler";
 import { OgmaInterceptor, OgmaModule } from "@ogma/nestjs-module";
 import { ExpressParser } from "@ogma/platform-express";
 import { MysqlBackupSchedulerService } from "../backup/mysql-backup.scheduler";
+import { AccountsModule } from "../accounts/accounts.module";
+import { Account } from "../accounts/account.entity";
 import { BasicAuthGuard } from "../auth/basic-auth.guard";
 import { ShareRouteThrottlerGuard } from "../auth/share-throttler.guard";
 import { EnvKey } from "../common/env-keys";
@@ -14,6 +16,10 @@ import { FileTag } from "../storage/domain/entities/file-tag.entity";
 import { Folder } from "../storage/domain/entities/folder.entity";
 import { StoredFile } from "../storage/domain/entities/stored-file.entity";
 import { StorageModule } from "../storage/storage.module";
+import { AppSetting } from "../settings/app-setting.entity";
+import { RuntimeConfigService } from "../settings/runtime-config.service";
+import { SettingsModule } from "../settings/settings.module";
+import { AdminRuntimeSettingsController } from "./admin-runtime-settings.controller";
 import { AppController } from "./app.controller";
 import { AppService } from "./app.service";
 import { TelegramAlertExceptionFilter } from "./telegram-alert-exception.filter";
@@ -38,32 +44,29 @@ import { TelegramAlertExceptionFilter } from "./telegram-alert-exception.filter"
         password: config.getOrThrow<string>(EnvKey.MYSQL_PASSWORD),
         database: config.getOrThrow<string>(EnvKey.MYSQL_DATABASE),
         charset: "utf8mb4",
-        entities: [Folder, StoredFile, FileTag],
+        entities: [Folder, StoredFile, FileTag, Account, AppSetting],
         synchronize:
           config.getOrThrow<string>(EnvKey.TYPEORM_SYNCHRONIZE) === "true",
       }),
     }),
+    SettingsModule,
+    AccountsModule,
     StorageModule,
     ThrottlerModule.forRootAsync({
-      imports: [ConfigModule],
-      inject: [ConfigService],
-      useFactory: (config: ConfigService) => ({
+      imports: [SettingsModule],
+      inject: [RuntimeConfigService],
+      useFactory: (runtime: RuntimeConfigService) => ({
         throttlers: [
           {
-            ttl: Math.max(
-              1000,
-              Number(config.get<string>(EnvKey.SHARE_RATE_LIMIT_TTL_MS) ?? 60000),
-            ),
-            limit: Math.max(
-              1,
-              Number(config.get<string>(EnvKey.SHARE_RATE_LIMIT_MAX) ?? 60),
-            ),
+            name: "default",
+            ttl: () => runtime.shareRateLimitTtlMs(),
+            limit: () => runtime.shareRateLimitMax(),
           },
         ],
       }),
     }),
   ],
-  controllers: [AppController],
+  controllers: [AppController, AdminRuntimeSettingsController],
   providers: [
     AppService,
     MysqlBackupSchedulerService,

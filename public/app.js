@@ -2,8 +2,35 @@ const API = "/api/v1";
 const ROOT = "root";
 const INTERNAL_DRAG_TYPE = "application/x-telegram-drive-item";
 const AUTH_STORAGE_KEY = "tg-drive-basic-auth";
+
+function readAuthCookie() {
+  const m = document.cookie.match(/(?:^|;\s*)tg_drive_auth=([^;]*)/);
+  if (!m?.[1]) return null;
+  try {
+    return decodeURIComponent(m[1]);
+  } catch {
+    return null;
+  }
+}
 const VIEW_STORAGE_KEY = "tg-drive-file-view";
 const NAV_STORAGE_KEY = "tg-drive-nav-state";
+
+/** Khớp PATCH /admin/settings (không gồm queue worker). */
+const RUNTIME_ADMIN_FORM_ROWS = [
+  ["PUBLIC_APP_URL", "text"],
+  ["TELEGRAM_STORAGE_CHAT_FOR_PUBLIC_ID", "text"],
+  ["TELEGRAM_ALERT_CHAT_ID", "text"],
+  ["TELEGRAM_SYNC_FOLDER_ID", "text"],
+  ["SHARE_RATE_LIMIT_TTL_MS", "number"],
+  ["SHARE_RATE_LIMIT_MAX", "number"],
+  ["FOLDER_ZIP_MAX_FILES", "number"],
+  ["FOLDER_ZIP_DOWNLOAD_TOKEN_TTL_SECONDS", "number"],
+  ["TELEGRAM_DOWNLOAD_MAX_MB", "number"],
+  ["MYSQL_IMPORT_MAX_MB", "number"],
+  ["MYSQL_BACKUP_ENABLED", "checkbox"],
+  ["MYSQL_BACKUP_CRON", "text"],
+  ["MYSQL_BACKUP_FOLDER_NAME", "text"],
+];
 const PREVIEW_CACHE_NAME = "tg-drive-preview-cache-v1";
 const UPLOAD_DB_NAME = "tg-drive-upload-queue";
 const UPLOAD_STORE_NAME = "uploads";
@@ -31,7 +58,7 @@ const i18n = {
     folderExistsHint: "Folder này đã có trên server. Bạn muốn merge dữ liệu vào folder cũ hay tạo folder mới với hậu tố (1)?",
     logout: "Đăng xuất",
     loginTitle: "Đăng nhập",
-    loginHint: "Nhập Basic Auth trong file .env. Phiên đăng nhập sẽ được lưu cho tới khi bạn bấm đăng xuất.",
+    loginHint: "Đăng nhập tại /login.html — phiên lưu cho đến khi đăng xuất.",
     username: "Tài khoản",
     password: "Mật khẩu",
     login: "Đăng nhập",
@@ -51,7 +78,37 @@ const i18n = {
     search: "Tìm kiếm",
     trash: "Thùng rác",
     queue: "Queue lỗi",
+    settings: "Cài đặt",
     admin: "Admin/API",
+    settingsHint:
+      "Quota MinIO, chỉnh bot Telegram / chat lưu file và giới hạn upload theo tài khoản.",
+    minioQuotaLabel: "MinIO",
+    adminAccountQuotaTitle: "Quota MinIO theo tài khoản (admin)",
+    accountLabel: "Tài khoản",
+    roleLabel: "Vai trò",
+    accountMinioQuota: "Quota MinIO (account)",
+    minioDisabledHint: "Chưa bật quota MinIO — chỉ lưu qua Telegram (tối đa ~20MB/file).",
+    quotaSaved: "Đã lưu quota",
+    loadingProfile: "Đang tải…",
+    saveQuota: "Lưu",
+    telegramConnectionTitle: "Kết nối Telegram",
+    usePlatformTelegramLabel: "Dùng bot và kênh của admin đầu tiên",
+    usePlatformTelegramHint:
+      "Bật thì dùng bot token của admin đầu tiên; chat lưu lấy từ TELEGRAM_STORAGE_CHAT_FOR_PUBLIC_ID (Cài đặt server) nếu có, không thì chat đã lưu trên tài khoản đó. Tắt để nhập bot và kênh riêng.",
+    primaryAdminTelegramHint:
+      "Bạn là admin đầu tiên: bot token trên đây + chat lưu (ô dưới hoặc TELEGRAM_STORAGE_CHAT_FOR_PUBLIC_ID trong Cài đặt server) phục vụ webhook và user “dùng chung”. Không thể chuyển sang chế độ dùng chung.",
+    telegramBotTokenLabel: "Bot token",
+    telegramBotTokenKeepHint:
+      "Để trống nếu chỉ đổi chat ID hoặc giữ nguyên token hiện tại.",
+    telegramChatIdLabel: "Chat / channel ID lưu file",
+    telegramSaved: "Đã lưu cấu hình Telegram",
+    systemSettingsTitle: "Cấu hình server",
+    systemSettingsHint:
+      "`TELEGRAM_STORAGE_CHAT_FOR_PUBLIC_ID` (chat lưu chung — chỉ UI/DB, không env), chat cảnh báo (`TELEGRAM_ALERT_CHAT_ID`), URL công khai, ZIP, backup MySQL… Bot token vẫn trên tài khoản admin đầu tiên (Cài đặt → Kết nối Telegram). Áp dụng ngay (worker queue chỉ đọc từ env khi khởi động).",
+    runtimeSave: "Lưu cấu hình",
+    runtimeSaved: "Đã lưu cấu hình server",
+    queueWorkerTitle: "Upload queue (chỉ env)",
+    runtimeOverridesHint: "Khóa trong app_settings (khởi tạo đủ khi chạy app lần đầu)",
     storage: "Dung lượng",
     quickSearch: "Tìm trong drive",
     newFolder: "Thư mục mới",
@@ -129,6 +186,8 @@ const i18n = {
     parentFolder: "..",
     noSubfolders: "Không có thư mục con",
     confirmDeleteSelected: "Xóa các mục đã chọn?",
+    selectMode: "Chọn nhiều",
+    selectModeDone: "Xong",
     cancel: "Hủy",
     confirm: "Xác nhận",
     empty: "Chưa có dữ liệu",
@@ -165,7 +224,7 @@ const i18n = {
     confirmReconcile: "Chạy reconcile thật và xóa metadata lỗi?",
     inputRequired: "Vui lòng nhập thông tin",
     imported: "Đã import",
-    authHint: "Nếu API hỏi đăng nhập, dùng Basic Auth trong file .env.",
+    authHint: "Nếu hết phiên, mở /login.html để đăng nhập lại.",
   },
   en: {
     brandSubtitle: "Cloud through Telegram",
@@ -180,7 +239,7 @@ const i18n = {
     folderExistsHint: "This folder already exists on the server. Do you want to merge into it or create a new folder with suffix (1)?",
     logout: "Logout",
     loginTitle: "Sign in",
-    loginHint: "Enter Basic Auth from .env. The session is saved until you log out.",
+    loginHint: "Sign in at /login.html — session persists until you log out.",
     username: "Username",
     password: "Password",
     login: "Sign in",
@@ -200,7 +259,35 @@ const i18n = {
     search: "Search",
     trash: "Trash",
     queue: "Failed queue",
+    settings: "Settings",
     admin: "Admin/API",
+    settingsHint: "MinIO quota, Telegram bot/storage chat, and upload limits for your account.",
+    minioQuotaLabel: "MinIO",
+    adminAccountQuotaTitle: "Per-account MinIO quota (admin)",
+    accountLabel: "Account",
+    roleLabel: "Role",
+    accountMinioQuota: "Account MinIO quota",
+    minioDisabledHint: "MinIO quota off — Telegram-only storage (~20MB/file max).",
+    quotaSaved: "Quota saved",
+    loadingProfile: "Loading…",
+    saveQuota: "Save",
+    telegramConnectionTitle: "Telegram connection",
+    usePlatformTelegramLabel: "Use the first admin account's bot and storage channel",
+    usePlatformTelegramHint:
+      "When enabled, uploads use the first admin's bot token; the storage chat is `TELEGRAM_STORAGE_CHAT_FOR_PUBLIC_ID` (server settings) if set, otherwise the chat saved on that admin account. Turn off to use your own bot and channel.",
+    primaryAdminTelegramHint:
+      "You are the first admin: your bot token below plus storage chat (this field or `TELEGRAM_STORAGE_CHAT_FOR_PUBLIC_ID` in server settings) powers the webhook and shared defaults. You cannot switch to shared mode.",
+    telegramBotTokenLabel: "Bot token",
+    telegramBotTokenKeepHint: "Leave empty to keep your current token when changing only the chat ID.",
+    telegramChatIdLabel: "Storage chat / channel ID",
+    telegramSaved: "Telegram settings saved",
+    systemSettingsTitle: "Server settings",
+    systemSettingsHint:
+      "`TELEGRAM_STORAGE_CHAT_FOR_PUBLIC_ID` (shared storage — UI/DB only, not env), alert chat (`TELEGRAM_ALERT_CHAT_ID`), public URL, ZIP, MySQL backup… Bot token stays on the first admin account (Settings → Telegram connection). Applied immediately (upload queue still reads env at worker startup).",
+    runtimeSave: "Save settings",
+    runtimeSaved: "Server settings saved",
+    queueWorkerTitle: "Upload queue (env only)",
+    runtimeOverridesHint: "Keys in app_settings (all seeded on first app boot)",
     storage: "Storage",
     quickSearch: "Search in drive",
     newFolder: "New folder",
@@ -278,6 +365,8 @@ const i18n = {
     parentFolder: "..",
     noSubfolders: "No subfolders",
     confirmDeleteSelected: "Delete selected items?",
+    selectMode: "Select",
+    selectModeDone: "Done",
     cancel: "Cancel",
     confirm: "Confirm",
     empty: "No data yet",
@@ -314,7 +403,7 @@ const i18n = {
     confirmReconcile: "Run real reconcile and delete broken metadata?",
     inputRequired: "Please enter a value",
     imported: "Imported",
-    authHint: "If the API asks for login, use Basic Auth from .env.",
+    authHint: "If your session expired, open /login.html to sign in again.",
   },
 };
 
@@ -327,8 +416,7 @@ const state = {
   trashPath: [],
   dragDepth: 0,
   loadingFolderId: null,
-  authToken: localStorage.getItem(AUTH_STORAGE_KEY),
-  authPromptPromise: null,
+  authToken: localStorage.getItem(AUTH_STORAGE_KEY) || readAuthCookie(),
   fileView: localStorage.getItem(VIEW_STORAGE_KEY) || "list",
   searchActive: false,
   driveFolders: [],
@@ -348,6 +436,11 @@ const state = {
   uploadProcessing: false,
   uploadRetryTimer: null,
   maxUploadBytes: 50 * 1024 * 1024 * 1024,
+  selectionMode: false,
+  /** Ignore backdrop closes immediately after open (double-click ghost click). */
+  previewBackdropGuardUntil: 0,
+  /** Payload gần nhất từ GET /auth/verify (sau applyAppConfig). */
+  accountProfile: null,
 };
 
 function parseStoredJson(key) {
@@ -968,8 +1061,10 @@ async function forceReauth() {
   clearAuth();
   hideContextMenu();
   closeFilePreview();
-  toast(t("loginInvalid"));
-  return ensureAuth();
+  const path = `${location.pathname}${location.search}${location.hash}`;
+  const next = encodeURIComponent(path || "/");
+  window.location.assign(`/login.html?next=${next}`);
+  throw new Error("NEEDS_LOGIN");
 }
 
 function persistAuthCookie() {
@@ -979,36 +1074,10 @@ function persistAuthCookie() {
 
 function ensureAuth() {
   if (state.authToken) return Promise.resolve(state.authToken);
-  if (state.authPromptPromise) return state.authPromptPromise;
-  state.authPromptPromise = new Promise((resolve) => {
-    const backdrop = $("#authBackdrop");
-    const form = $("#authModal");
-    const user = $("#authUser");
-    const pass = $("#authPass");
-    backdrop.classList.remove("hidden");
-    form.onsubmit = async (event) => {
-      event.preventDefault();
-      const token = btoa(`${user.value}:${pass.value}`);
-      const submit = form.querySelector('button[type="submit"]');
-      submit.disabled = true;
-      const ok = await verifyAuthToken(token).catch(() => false);
-      submit.disabled = false;
-      if (!ok) {
-        toast(t("loginInvalid"));
-        pass.select();
-        return;
-      }
-      state.authToken = token;
-      localStorage.setItem(AUTH_STORAGE_KEY, token);
-      persistAuthCookie();
-      pass.value = "";
-      backdrop.classList.add("hidden");
-      state.authPromptPromise = null;
-      resolve(token);
-    };
-    setTimeout(() => user.focus(), 0);
-  });
-  return state.authPromptPromise;
+  const path = `${location.pathname}${location.search}${location.hash}`;
+  const next = encodeURIComponent(path || "/");
+  window.location.assign(`/login.html?next=${next}`);
+  return Promise.reject(new Error("NEEDS_LOGIN"));
 }
 
 async function verifyAuthToken(token) {
@@ -1029,6 +1098,20 @@ function applyAppConfig(data) {
   if (Number.isFinite(limit) && limit > 0) {
     state.maxUploadBytes = limit;
   }
+  if (data?.username) {
+    state.accountProfile = {
+      username: data.username,
+      role: data.role,
+      rootFolderId: data.rootFolderId,
+      maxUploadBytes: data.maxUploadBytes,
+      minioLimitBytes: Number(data.minioLimitBytes || 0),
+      telegramUsePlatformDefaults: data.telegramUsePlatformDefaults !== false,
+      telegramStorageChatId: data.telegramStorageChatId ?? "",
+      hasTelegramBotToken: Boolean(data.hasTelegramBotToken),
+      isPrimaryAdmin: Boolean(data.isPrimaryAdmin),
+    };
+  }
+  renderSettingsSelf();
 }
 
 async function loadAppConfig() {
@@ -1054,23 +1137,34 @@ function applyLanguage() {
   langToggle.title = state.lang === "vi" ? "Tiếng Việt" : "English";
   syncViewToggle();
   renderBreadcrumbs();
+  syncSelectionModeUi();
+  renderSettingsSelf();
+  if (state.view === "settings" && state.accountProfile?.role === "admin") {
+    void loadRuntimeSettingsAdmin().catch(showError);
+    void loadAdminAccountsForSettings().catch(showError);
+  }
 }
 
 function setView(view, opts = {}) {
-  if (!["drive", "trash", "queue", "admin"].includes(view)) {
+  if (!["drive", "trash", "queue", "settings", "admin"].includes(view)) {
     view = "drive";
   }
   state.view = view;
   $$(".nav-item").forEach((btn) => btn.classList.toggle("active", btn.dataset.view === view));
-  ["drive", "trash", "queue", "admin"].forEach((name) => {
+  ["drive", "trash", "queue", "settings", "admin"].forEach((name) => {
     $(`#${name}View`)?.classList.toggle("hidden", name !== view);
   });
+  if (view !== "drive") {
+    exitSelectionMode();
+  }
+  syncTouchChrome();
   if (opts.persist !== false) {
     persistNavigationState();
   }
   if (opts.load !== false) {
     if (view === "trash") void loadTrash();
     if (view === "queue") void loadQueue();
+    if (view === "settings") void loadSettingsView().catch(showError);
   }
 }
 
@@ -1113,7 +1207,7 @@ function restoreNavigationState() {
   const saved = parseStoredJson(NAV_STORAGE_KEY) || {};
   const fromHash = parseHashNavigation();
   const source = { ...saved, ...(fromHash || {}) };
-  if (["drive", "trash", "queue", "admin"].includes(source.view)) {
+  if (["drive", "trash", "queue", "settings", "admin"].includes(source.view)) {
     state.view = source.view;
   }
   if (source.folderId) {
@@ -1213,7 +1307,7 @@ async function navigateToFolder(folderId, folderName) {
   state.loadingFolderId = folderId;
   try {
     clearDriveSearch({ persist: false });
-    clearFileSelection();
+    exitSelectionMode();
     state.folderId = folderId;
     if (folderName) {
       const existingIndex = state.path.findIndex((crumb) => crumb.id === folderId);
@@ -1285,6 +1379,10 @@ function renderFolders(folders) {
     makeDropTarget(btn, folder.id);
     btn.addEventListener("click", (event) => {
       event.preventDefault();
+      if (touchBulkSelectActive()) {
+        toggleTouchItemSelection("folder", folder.id);
+        return;
+      }
       if (isTouchLikePointer()) {
         void navigateToFolder(folder.id, folder.name).catch(showError);
         return;
@@ -1503,6 +1601,61 @@ function clearFileSelection() {
   syncSelectionBar();
 }
 
+function touchBulkSelectActive() {
+  return Boolean(state.selectionMode && !isDesktopFinePointer());
+}
+
+function toggleTouchItemSelection(type, id) {
+  if (type === "folder") {
+    state.selectionAnchor = { type: "folder", id };
+    if (state.selectedFolderIds.has(id)) {
+      state.selectedFolderIds.delete(id);
+    } else {
+      state.selectedFolderIds.add(id);
+    }
+  } else {
+    state.selectionAnchor = { type: "file", id };
+    if (state.selectedFileIds.has(id)) {
+      state.selectedFileIds.delete(id);
+    } else {
+      state.selectedFileIds.add(id);
+    }
+  }
+  syncSelectedRows();
+  syncSelectionBar();
+}
+
+function exitSelectionMode() {
+  state.selectionMode = false;
+  clearFileSelection();
+  syncSelectionModeUi();
+}
+
+function syncSelectionModeUi() {
+  $(".app-shell")?.classList.toggle(
+    "drive-selection-mode",
+    Boolean(state.selectionMode && !isDesktopFinePointer() && state.view === "drive"),
+  );
+  const toggleBtn = $("#selectModeToggle");
+  if (toggleBtn && !isDesktopFinePointer()) {
+    toggleBtn.textContent = state.selectionMode ? t("selectModeDone") : t("selectMode");
+    toggleBtn.classList.toggle("active", state.selectionMode);
+    toggleBtn.setAttribute("aria-pressed", String(state.selectionMode));
+  }
+}
+
+function syncTouchChrome() {
+  const toggleBtn = $("#selectModeToggle");
+  if (!toggleBtn) return;
+  const show = Boolean(state.view === "drive" && !isDesktopFinePointer());
+  toggleBtn.classList.toggle("hidden", !show);
+  if (!show && state.selectionMode) {
+    state.selectionMode = false;
+    clearFileSelection();
+  }
+  syncSelectionModeUi();
+}
+
 function selectedItemCount() {
   return state.selectedFolderIds.size + state.selectedFileIds.size;
 }
@@ -1520,7 +1673,8 @@ function syncSelectionBar() {
   const bar = $("#selectionBar");
   if (!bar) return;
   const count = selectedItemCount();
-  bar.classList.toggle("hidden", count < 2);
+  const touchBulk = touchBulkSelectActive();
+  bar.classList.toggle("hidden", count < (touchBulk ? 1 : 2));
   $("#selectionCount").textContent = `${count} ${t("selectedItems")}`;
 }
 
@@ -1584,6 +1738,10 @@ function renderFileList(target, files, mode = "drive") {
     setInternalDrag(row, { type: "file", id: file.id, name: file.name });
     row.addEventListener("click", (event) => {
       if (event.target.closest(".row-actions")) return;
+      if (touchBulkSelectActive() && mode !== "trash") {
+        toggleTouchItemSelection("file", file.id);
+        return;
+      }
       if (isTouchLikePointer()) {
         void openFilePreview(file).catch(showError);
         return;
@@ -1594,6 +1752,8 @@ function renderFileList(target, files, mode = "drive") {
     });
     row.addEventListener("dblclick", (event) => {
       if (event.target.closest(".row-actions")) return;
+      event.preventDefault();
+      event.stopPropagation();
       if (mode !== "trash") {
         state.selectedFileIds.add(file.id);
         syncSelectedRows();
@@ -1662,6 +1822,11 @@ function renderFileList(target, files, mode = "drive") {
 
 function isTouchLikePointer() {
   return window.matchMedia?.("(hover: none), (pointer: coarse)").matches ?? false;
+}
+
+/** Chuột chuẩn trên desktop — ẩn UI chọn-nhiều-cảm-ứng. */
+function isDesktopFinePointer() {
+  return window.matchMedia?.("(hover: hover) and (pointer: fine)").matches ?? false;
 }
 
 function compactFileNameForMobile(name) {
@@ -1754,7 +1919,7 @@ async function openFilePreview(file) {
   $("#viewerDownloadButton").onclick = () => void downloadWithAuth(downloadUrl, file.name).catch(showError);
   body.innerHTML = "";
   body.className = "viewer-body";
-  $("#viewerBackdrop").classList.remove("hidden");
+  revealViewerBackdrop();
   syncViewerNav();
 
   if (file.mimeType?.startsWith("image/")) {
@@ -1967,7 +2132,7 @@ function showTelegramFallback(file, previewToken = state.previewToken) {
   $("#viewerDownloadButton").onclick = () => openTelegramMessage(file);
   body.innerHTML = "";
   body.className = "viewer-body";
-  $("#viewerBackdrop").classList.remove("hidden");
+  revealViewerBackdrop();
   syncViewerNav();
   const fallback = document.createElement("div");
   fallback.className = "unsupported-preview";
@@ -2107,7 +2272,13 @@ async function downloadWithAuth(url, filename) {
   }
 }
 
+function revealViewerBackdrop() {
+  $("#viewerBackdrop").classList.remove("hidden");
+  state.previewBackdropGuardUntil = performance.now() + 480;
+}
+
 function closeFilePreview() {
+  state.previewBackdropGuardUntil = 0;
   state.previewToken++;
   $("#viewerBackdrop").classList.add("hidden");
   const body = $("#viewerBody");
@@ -2151,7 +2322,7 @@ async function openThumbnailPreview(file) {
     void downloadWithAuth(fileThumbnailUrl(file), `${file.name}.thumb.jpg`).catch(showError);
   body.innerHTML = "";
   body.className = "viewer-body image-mode";
-  $("#viewerBackdrop").classList.remove("hidden");
+  revealViewerBackdrop();
   const img = document.createElement("img");
   img.src = fileThumbnailUrl(file);
   img.alt = file.name;
@@ -2289,14 +2460,313 @@ function escapeHtml(value) {
     .replaceAll("'", "&#039;");
 }
 
+function formatQuotaGb(bytes) {
+  const n = Number(bytes) || 0;
+  if (n <= 0) return "0";
+  return (n / (1024 * 1024 * 1024)).toFixed(2);
+}
+
+function wireSelfTelegramForm() {
+  const plat = $("#selfTelegramPlatform");
+  const wrap = $("#selfTelegramCustomWrap");
+  const save = $("#selfTelegramSave");
+  if (!wrap || !save) return;
+  if (plat) {
+    const sync = () => {
+      wrap.hidden = plat.checked;
+    };
+    plat.addEventListener("change", sync);
+    sync();
+  } else {
+    wrap.hidden = false;
+  }
+  save.addEventListener("click", () => void saveSelfTelegram().catch(showError));
+}
+
+async function saveSelfTelegram() {
+  const plat = $("#selfTelegramPlatform");
+  const saveBtn = $("#selfTelegramSave");
+  if (!saveBtn) return;
+  const primary = state.accountProfile?.isPrimaryAdmin === true;
+  const usePlatform = primary ? false : Boolean(plat?.checked);
+  const body = { usePlatformTelegramStorage: usePlatform };
+  if (!usePlatform) {
+    const tok = $("#selfTelegramBotToken")?.value.trim();
+    const chat = $("#selfTelegramChatId")?.value.trim();
+    if (tok) body.telegramBotToken = tok;
+    if (chat) body.telegramStorageChatId = chat;
+  }
+  saveBtn.disabled = true;
+  try {
+    await api("/auth/me/telegram", {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    });
+    toast(t("telegramSaved"));
+    const ta = $("#selfTelegramBotToken");
+    if (ta) ta.value = "";
+    await loadAppConfig();
+  } finally {
+    saveBtn.disabled = false;
+  }
+}
+
+function renderSettingsSelf() {
+  const root = $("#settingsSelfCard");
+  const adminWrap = $("#settingsAdminSection");
+  if (!root) return;
+  const profile = state.accountProfile;
+  if (!profile) {
+    root.innerHTML = `<p class="settings-muted">${escapeHtml(t("loadingProfile"))}</p>`;
+    if (adminWrap) adminWrap.classList.add("hidden");
+    return;
+  }
+  const hint =
+    profile.minioLimitBytes <= 0
+      ? `<p class="settings-muted">${escapeHtml(t("minioDisabledHint"))}</p>`
+      : "";
+  const usePlat = profile.telegramUsePlatformDefaults !== false;
+  const primary = profile.isPrimaryAdmin === true;
+  const chatVal = escapeHtml(profile.telegramStorageChatId ?? "");
+  const platformBlock = primary
+    ? `<p class="field-hint settings-telegram-hint">${escapeHtml(t("primaryAdminTelegramHint"))}</p>`
+    : `<label class="modal-field modal-field-row settings-telegram-platform-row">
+          <input type="checkbox" id="selfTelegramPlatform" ${usePlat ? "checked" : ""} />
+          <span>${escapeHtml(t("usePlatformTelegramLabel"))}</span>
+        </label>
+        <p class="field-hint settings-telegram-hint">${escapeHtml(t("usePlatformTelegramHint"))}</p>`;
+  root.innerHTML = `
+    <article class="admin-card settings-account-card">
+      <div class="admin-kv">
+        <div class="admin-kv-row"><span>${escapeHtml(t("accountLabel"))}</span><span>${escapeHtml(profile.username)}</span></div>
+        <div class="admin-kv-row"><span>${escapeHtml(t("roleLabel"))}</span><span>${escapeHtml(profile.role)}</span></div>
+      </div>
+      <div class="settings-self-telegram">
+        <h3 class="settings-self-telegram-title">${escapeHtml(t("telegramConnectionTitle"))}</h3>
+        ${platformBlock}
+        <div id="selfTelegramCustomWrap" class="settings-telegram-custom">
+          <label class="modal-field">
+            <span>${escapeHtml(t("telegramBotTokenLabel"))}</span>
+            <textarea id="selfTelegramBotToken" rows="3" spellcheck="false" autocomplete="off" placeholder="••••"></textarea>
+          </label>
+          <p class="field-hint">${escapeHtml(t("telegramBotTokenKeepHint"))}</p>
+          <label class="modal-field">
+            <span>${escapeHtml(t("telegramChatIdLabel"))}</span>
+            <input id="selfTelegramChatId" type="text" spellcheck="false" autocomplete="off" value="${chatVal}" />
+          </label>
+        </div>
+        <div class="settings-telegram-actions">
+          <button type="button" class="primary-action compact" id="selfTelegramSave">${escapeHtml(t("saveQuota"))}</button>
+        </div>
+      </div>
+      ${hint}
+    </article>`;
+  wireSelfTelegramForm();
+  const sysWrap = $("#settingsSystemSection");
+  if (sysWrap) {
+    sysWrap.classList.toggle("hidden", profile.role !== "admin");
+  }
+  if (adminWrap) {
+    adminWrap.classList.toggle("hidden", profile.role !== "admin");
+  }
+}
+
+async function loadSettingsView() {
+  renderSettingsSelf();
+  if (state.accountProfile?.role === "admin") {
+    await loadRuntimeSettingsAdmin();
+    await loadAdminAccountsForSettings();
+  }
+}
+
+function renderRuntimeSettingsMarkup(data) {
+  const eff = data.effective || {};
+  const rows = RUNTIME_ADMIN_FORM_ROWS.map(([key, kind]) => {
+    const id = `sys_${key}`;
+    const rawVal = eff[key];
+    if (kind === "checkbox") {
+      const on = Boolean(rawVal);
+      return `<label class="settings-runtime-row"><code>${escapeHtml(key)}</code><span><input type="checkbox" id="${id}" ${on ? "checked" : ""} /></span></label>`;
+    }
+    const str =
+      rawVal === undefined || rawVal === null ? "" : typeof rawVal === "boolean" ? String(rawVal) : String(rawVal);
+    if (kind === "textarea") {
+      const escaped = escapeHtml(str);
+      return `<label class="settings-runtime-row settings-runtime-row-stack"><code>${escapeHtml(key)}</code><textarea class="settings-runtime-input" id="${id}" rows="3" spellcheck="false">${escaped}</textarea></label>`;
+    }
+    const inputType = kind === "number" ? "number" : "text";
+    const stepAttr = kind === "number" ? ' step="any" min="0"' : "";
+    return `<label class="settings-runtime-row"><code>${escapeHtml(key)}</code><input class="settings-runtime-input" id="${id}" type="${inputType}"${stepAttr} value="${escapeHtml(str)}" /></label>`;
+  }).join("");
+  const overrides = (data.overriddenKeys || []).join(", ") || "—";
+  const queueJson = escapeHtml(JSON.stringify(data.queueWorkerEnv || {}, null, 2));
+  return `
+    <article class="admin-card settings-runtime-card">
+      <div class="settings-runtime-fields">${rows}</div>
+      <div class="settings-runtime-actions">
+        <button type="button" class="primary-action compact" id="settingsSystemSaveButton">${escapeHtml(t("runtimeSave"))}</button>
+      </div>
+      <p class="settings-muted"><strong>${escapeHtml(t("runtimeOverridesHint"))}:</strong> ${escapeHtml(overrides)}</p>
+    </article>
+    <article class="admin-card settings-queue-env-card">
+      <strong>${escapeHtml(t("queueWorkerTitle"))}</strong>
+      <pre class="settings-runtime-pre">${queueJson}</pre>
+      <p class="settings-muted">${escapeHtml(data.queueWorkerHint || "")}</p>
+    </article>`;
+}
+
+function collectRuntimeSettingsPatch() {
+  const patch = {};
+  for (const [key, kind] of RUNTIME_ADMIN_FORM_ROWS) {
+    const id = `sys_${key}`;
+    const el = document.getElementById(id);
+    if (!el) continue;
+    if (kind === "checkbox") {
+      patch[key] = el.checked;
+      continue;
+    }
+    if (kind === "textarea") {
+      const v = el.value.trim();
+      patch[key] = v === "" ? null : v;
+      continue;
+    }
+    const v = el.value.trim();
+    if (v === "") {
+      patch[key] = null;
+      continue;
+    }
+    if (kind === "number") {
+      const n = Number(v);
+      if (!Number.isFinite(n)) continue;
+      patch[key] = n;
+      continue;
+    }
+    patch[key] = v;
+  }
+  return patch;
+}
+
+async function loadRuntimeSettingsAdmin() {
+  const mount = $("#settingsSystemFormMount");
+  if (!mount || state.accountProfile?.role !== "admin") return;
+  mount.innerHTML = `<p class="settings-muted">${escapeHtml(t("loadingProfile"))}</p>`;
+  try {
+    const data = await api("/admin/settings");
+    state.adminRuntimeSettings = data;
+    mount.innerHTML = renderRuntimeSettingsMarkup(data);
+    $("#settingsSystemSaveButton")?.addEventListener("click", () =>
+      void saveRuntimeSettings().catch(showError),
+    );
+  } catch (err) {
+    mount.innerHTML = "";
+    showError(err);
+  }
+}
+
+async function saveRuntimeSettings() {
+  const btn = $("#settingsSystemSaveButton");
+  if (btn) btn.disabled = true;
+  try {
+    const patch = collectRuntimeSettingsPatch();
+    const res = await api("/admin/settings", {
+      method: "PATCH",
+      body: JSON.stringify(patch),
+    });
+    state.adminRuntimeSettings = res;
+    toast(t("runtimeSaved"));
+    await Promise.all([loadAppConfig(), loadQuota()]);
+    $("#settingsSystemFormMount").innerHTML = renderRuntimeSettingsMarkup(res);
+    $("#settingsSystemSaveButton")?.addEventListener("click", () =>
+      void saveRuntimeSettings().catch(showError),
+    );
+  } catch (err) {
+    showError(err);
+  } finally {
+    const savedBtn = $("#settingsSystemSaveButton");
+    if (savedBtn) savedBtn.disabled = false;
+  }
+}
+
+async function saveAccountQuotaRow(accountId, inputEl, buttonEl) {
+  const gb = Number(inputEl.value);
+  if (!Number.isFinite(gb) || gb < 0) {
+    toast(t("inputRequired"));
+    return;
+  }
+  buttonEl.disabled = true;
+  try {
+    await api(`/admin/accounts/${encodeURIComponent(accountId)}/quota`, {
+      method: "PATCH",
+      body: JSON.stringify({ minioLimitGb: gb }),
+    });
+    toast(t("quotaSaved"));
+    await loadAppConfig();
+    await loadQuota();
+    await loadAdminAccountsForSettings();
+  } catch (err) {
+    showError(err);
+  } finally {
+    buttonEl.disabled = false;
+  }
+}
+
+async function loadAdminAccountsForSettings() {
+  const wrap = $("#settingsAccountsTable");
+  if (!wrap || state.accountProfile?.role !== "admin") return;
+  wrap.innerHTML = `<p class="settings-muted">${escapeHtml(t("loadingProfile"))}</p>`;
+  try {
+    const rows = await api("/admin/accounts");
+    wrap.innerHTML = "";
+    const table = document.createElement("table");
+    table.className = "settings-accounts-table";
+    const thead = document.createElement("thead");
+    thead.innerHTML = `<tr>
+      <th>${escapeHtml(t("accountLabel"))}</th>
+      <th>${escapeHtml(t("roleLabel"))}</th>
+      <th>${escapeHtml(t("accountMinioQuota"))}</th>
+      <th></th>
+    </tr>`;
+    table.appendChild(thead);
+    const tbody = document.createElement("tbody");
+    for (const row of rows) {
+      const tr = document.createElement("tr");
+      const gbVal = Number(row.minioLimitGb ?? 0);
+      tr.innerHTML = `
+        <td>${escapeHtml(row.username)}</td>
+        <td>${escapeHtml(row.role)}</td>
+        <td><input type="number" min="0" step="0.01" class="settings-quota-input" value="${gbVal}" /></td>
+        <td><button type="button" class="ghost compact settings-quota-save">${escapeHtml(t("saveQuota"))}</button></td>`;
+      const btn = tr.querySelector(".settings-quota-save");
+      const inp = tr.querySelector(".settings-quota-input");
+      btn.addEventListener("click", () => void saveAccountQuotaRow(row.id, inp, btn));
+      tbody.appendChild(tr);
+    }
+    table.appendChild(tbody);
+    wrap.appendChild(table);
+  } catch (err) {
+    wrap.innerHTML = "";
+    showError(err);
+  }
+}
+
 async function loadQuota() {
   const quota = await api("/files/quota");
   $("#quotaTotal").textContent = `${formatBytes(quota.totalBytes)} / ${t("unlimited")}`;
   $("#quotaBar").style.width = quota.totalBytes > 0 ? "100%" : "8%";
   const minioBytes = Number(quota.minioBytes || 0);
-  const minioLimitBytes = Number(quota.minioLimitBytes || 50 * 1024 * 1024 * 1024);
-  $("#minioQuotaDetail").textContent = `${formatBytes(minioBytes)} / ${formatBytes(minioLimitBytes)}`;
-  $("#minioQuotaBar").style.width = `${Math.min(100, Math.max(4, (minioBytes / (minioLimitBytes || 1)) * 100))}%`;
+  const accountLimit =
+    quota.accountMinioLimitBytes !== undefined && quota.accountMinioLimitBytes !== null
+      ? Number(quota.accountMinioLimitBytes)
+      : Number(quota.minioLimitBytes || 0);
+  const detailEl = $("#minioQuotaDetail");
+  const barEl = $("#minioQuotaBar");
+  if (accountLimit <= 0) {
+    detailEl.textContent = `${formatBytes(minioBytes)} · ${t("minioDisabledHint")}`;
+    barEl.style.width = minioBytes > 0 ? "100%" : "4%";
+  } else {
+    detailEl.textContent = `${formatBytes(minioBytes)} / ${formatBytes(accountLimit)}`;
+    barEl.style.width = `${Math.min(100, Math.max(4, (minioBytes / accountLimit) * 100))}%`;
+  }
 }
 
 async function loadDrive() {
@@ -3135,6 +3605,8 @@ function setDriveSearchActive(active, opts = {}) {
   state.searchActive = active;
   if (active) {
     state.selectedFolderIds.clear();
+    syncSelectedRows();
+    syncSelectionBar();
   }
   if (!active) {
     state.visibleFiles = state.driveFiles;
@@ -3180,7 +3652,11 @@ function wireEvents() {
   window.addEventListener("keydown", (event) => {
     if (event.key === "Escape") {
       hideContextMenu();
+      const previewWasOpen = !$("#viewerBackdrop").classList.contains("hidden");
       closeFilePreview();
+      if (!previewWasOpen && touchBulkSelectActive()) {
+        exitSelectionMode();
+      }
     }
     if (!$("#viewerBackdrop").classList.contains("hidden")) {
       if (event.key === "ArrowLeft") openAdjacentPreview(-1);
@@ -3202,12 +3678,35 @@ function wireEvents() {
   $("#viewerPrevButton").addEventListener("click", () => openAdjacentPreview(-1));
   $("#viewerNextButton").addEventListener("click", () => openAdjacentPreview(1));
   $("#viewerBackdrop").addEventListener("click", (event) => {
-    if (event.target === event.currentTarget) closeFilePreview();
+    if (event.target !== event.currentTarget) return;
+    if (performance.now() < state.previewBackdropGuardUntil) return;
+    closeFilePreview();
   });
   $("#logoutButton").addEventListener("click", logout);
   $("#transferClearButton").addEventListener("click", clearCompletedTransfers);
   $("#transferCollapseButton").addEventListener("click", toggleTransfersCollapsed);
   $("#viewToggleButton").addEventListener("click", toggleFileView);
+  $("#selectModeToggle").addEventListener("click", (event) => {
+    event.stopPropagation();
+    if (state.selectionMode) {
+      exitSelectionMode();
+    } else {
+      state.selectionMode = true;
+      syncSelectionModeUi();
+      syncSelectionBar();
+    }
+  });
+  $("#selectionMoveButton").addEventListener("click", (event) => {
+    event.stopPropagation();
+    void moveSelectedFiles().catch(showError);
+  });
+  $("#selectionDeleteButton").addEventListener("click", (event) => {
+    event.stopPropagation();
+    void deleteSelectedFiles().catch(showError);
+  });
+  window.addEventListener("resize", () => {
+    syncTouchChrome();
+  });
   $("#backFolderButton").addEventListener("click", () => void goBackFolder().catch(showError));
   $$(".nav-item").forEach((btn) => btn.addEventListener("click", () => setView(btn.dataset.view)));
   $("#langToggle").addEventListener("click", () => {
@@ -3295,6 +3794,12 @@ function wireEvents() {
     event.target.value = "";
     void importMysqlDump(file).catch(showError);
   });
+  $("#settingsAccountsRefreshButton")?.addEventListener("click", () =>
+    void loadAdminAccountsForSettings().catch(showError),
+  );
+  $("#settingsSystemRefreshButton")?.addEventListener("click", () =>
+    void loadRuntimeSettingsAdmin().catch(showError),
+  );
 }
 
 async function adminGet(path) {
@@ -3376,9 +3881,17 @@ function registerServiceWorker() {
 
 async function init() {
   registerServiceWorker();
+  if (!state.authToken) {
+    const path = `${location.pathname}${location.search}${location.hash}`;
+    window.location.replace(`/login.html?next=${encodeURIComponent(path || "/")}`);
+    return;
+  }
   restoreNavigationState();
   applyLanguage();
   persistAuthCookie();
+  if (state.authToken && !localStorage.getItem(AUTH_STORAGE_KEY)) {
+    localStorage.setItem(AUTH_STORAGE_KEY, state.authToken);
+  }
   wireEvents();
   setView(state.view, { persist: false, load: false });
   try {
@@ -3391,6 +3904,7 @@ async function init() {
     }
     if (state.view === "trash") await loadTrash();
     if (state.view === "queue") await loadQueue();
+    if (state.view === "settings") await loadSettingsView();
     persistNavigationState();
   } catch (err) {
     showError(err);

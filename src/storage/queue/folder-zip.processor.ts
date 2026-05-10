@@ -1,11 +1,13 @@
 import { OnWorkerEvent, Processor, WorkerHost } from '@nestjs/bullmq';
 import { Job } from 'bullmq';
 import { unlink } from 'fs/promises';
+import type { StorageTenant } from '../domain/storage-tenant';
 import { StorageService } from '../storage.service';
 import { BullMqWorkerEvent } from './file-upload.constants';
 import { FOLDER_ZIP_QUEUE } from './folder-zip.constants';
 
 export interface FolderZipJobData {
+  tenant: StorageTenant;
   folderIdParam: string;
 }
 
@@ -22,11 +24,12 @@ export class FolderZipProcessor extends WorkerHost {
 
   async process(job: Job<FolderZipJobData>): Promise<FolderZipJobResult> {
     const { entries, zipBaseName } = await this.storage.prepareFolderZipArchive(
+      job.data.tenant,
       job.data.folderIdParam,
     );
     const jobIdStr = job.id !== undefined ? String(job.id) : '';
     const zipPath = this.storage.resolveFolderZipOutputPath(jobIdStr);
-    await this.storage.writeFolderZipToDisk(entries, zipBaseName, zipPath);
+    await this.storage.writeFolderZipToDisk(job.data.tenant, entries, zipBaseName, zipPath);
     return { zipPath, zipBaseName };
   }
 

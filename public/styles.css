@@ -368,8 +368,10 @@ button:disabled {
   display: flex;
   align-items: center;
   justify-content: center;
-  flex: 0 0 auto;
-  min-width: auto;
+  flex-wrap: wrap;
+  gap: 8px;
+  flex: 0 1 auto;
+  min-width: 0;
   margin-left: 10px;
   padding: 7px 12px;
   border: 1px solid #c9d8f7;
@@ -379,7 +381,49 @@ button:disabled {
   font-size: 13px;
   font-weight: 700;
   line-height: 1;
-  white-space: nowrap;
+}
+
+.selection-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.selection-actions .compact {
+  padding: 6px 12px;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+#selectModeToggle.active {
+  border-color: var(--primary);
+  background: #dbeafe;
+  color: var(--primary-dark);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  #selectModeToggle {
+    display: none !important;
+  }
+}
+
+.app-shell.drive-selection-mode .folder-card:not(.selected):not(.processing),
+.app-shell.drive-selection-mode .file-row:not(.selected) {
+  opacity: 0.92;
+}
+
+@media (max-width: 520px) {
+  .path-row {
+    flex-wrap: wrap;
+  }
+
+  .selection-bar {
+    margin-left: 0;
+    width: 100%;
+    justify-content: space-between;
+    border-radius: 14px;
+  }
 }
 
 .selection-bar.hidden {
@@ -1161,6 +1205,24 @@ button:disabled {
   margin-bottom: 20px;
 }
 
+.modal-field-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.modal-field-row input[type="checkbox"] {
+  width: auto;
+  margin-top: 4px;
+  flex-shrink: 0;
+}
+
+.modal-field-row > span {
+  font-weight: 600;
+  color: var(--text);
+  line-height: 1.45;
+}
+
 .modal-field span {
   color: var(--muted);
   font-size: 13px;
@@ -1848,4 +1910,282 @@ button:disabled {
     box-shadow: 0 14px 30px rgba(26, 115, 232, 0.28);
     font-weight: 700;
   }
+}
+
+/* Trang đăng nhập / đăng ký (standalone) */
+.auth-page-body {
+  margin: 0;
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 28px 18px;
+  background:
+    radial-gradient(circle at top left, rgba(26, 115, 232, 0.16), transparent 34rem),
+    linear-gradient(135deg, #fbfdff 0%, var(--bg) 48%, #eef4ff 100%);
+}
+
+.auth-page-stack {
+  width: min(460px, 100%);
+  display: grid;
+  gap: 18px;
+}
+
+.auth-brand {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  text-align: left;
+}
+
+.auth-brand-logo {
+  width: 44px;
+  height: 44px;
+  border-radius: 12px;
+}
+
+.auth-brand strong {
+  display: block;
+  font-size: 1.15rem;
+  color: var(--text);
+}
+
+.auth-brand span {
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.auth-card.modal {
+  width: 100%;
+  margin: 0;
+}
+
+.auth-card .modal-head {
+  margin-bottom: 4px;
+}
+
+.auth-card .modal-head h1 {
+  margin: 0;
+  font-size: 1.35rem;
+}
+
+.auth-card .modal-description {
+  margin: 0 0 16px;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.45;
+}
+
+.auth-alert {
+  margin: 0 0 16px;
+  padding: 12px 14px;
+  border-radius: 14px;
+  background: var(--primary-soft);
+  color: var(--primary-dark);
+  font-size: 14px;
+  line-height: 1.45;
+}
+
+.auth-alert.error {
+  background: #fce8e6;
+  color: #b3261e;
+}
+
+.auth-card .modal-field textarea {
+  width: 100%;
+  min-height: 72px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 15px;
+  outline: 0;
+  font: inherit;
+  resize: vertical;
+}
+
+.auth-card .modal-field textarea:focus {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px rgba(26, 115, 232, 0.12);
+}
+
+.auth-card .field-hint {
+  margin: -12px 0 18px;
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.4;
+}
+
+.auth-foot {
+  text-align: center;
+  font-size: 14px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.auth-foot a {
+  color: var(--primary);
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.auth-foot a:hover {
+  text-decoration: underline;
+}
+
+.auth-submit.primary-action {
+  width: 100%;
+  justify-content: center;
+  padding: 12px 20px;
+  border-radius: 14px;
+  border: 0;
+  font-weight: 600;
+}
+
+.settings-account-card {
+  margin-bottom: 20px;
+}
+
+.settings-self-telegram {
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
+}
+
+.settings-self-telegram-title {
+  margin: 0 0 12px;
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.settings-self-telegram .settings-telegram-hint {
+  margin: -4px 0 12px;
+}
+
+.settings-self-telegram .modal-field textarea {
+  width: 100%;
+  min-height: 4.25rem;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 13px;
+  resize: vertical;
+}
+
+.settings-telegram-actions {
+  margin-top: 14px;
+}
+
+.settings-muted {
+  margin: 0;
+  font-size: 13px;
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.settings-admin-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 8px 0 14px;
+}
+
+.settings-admin-head h3 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.settings-accounts-table-wrap {
+  overflow-x: auto;
+}
+
+.settings-accounts-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  overflow: hidden;
+}
+
+.settings-accounts-table th,
+.settings-accounts-table td {
+  padding: 10px 12px;
+  text-align: left;
+  border-bottom: 1px solid var(--line);
+}
+
+.settings-accounts-table thead {
+  background: #f5f8ff;
+}
+
+.settings-accounts-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.settings-quota-input {
+  width: 100%;
+  max-width: 7rem;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  font-size: 13px;
+}
+
+.settings-runtime-card {
+  margin-bottom: 16px;
+}
+
+.settings-runtime-fields {
+  display: grid;
+  gap: 12px;
+}
+
+.settings-runtime-row {
+  display: grid;
+  grid-template-columns: minmax(160px, 1fr) minmax(0, 2fr);
+  gap: 10px;
+  align-items: center;
+}
+
+.settings-runtime-row-stack {
+  grid-template-columns: 1fr;
+  align-items: stretch;
+}
+
+.settings-runtime-row-stack textarea.settings-runtime-input {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  resize: vertical;
+  min-height: 4.25rem;
+}
+
+.settings-runtime-row code {
+  font-size: 11px;
+  word-break: break-all;
+}
+
+.settings-runtime-input {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  font-size: 13px;
+}
+
+.settings-runtime-actions {
+  margin-top: 14px;
+}
+
+.settings-runtime-pre {
+  margin: 10px 0 0;
+  padding: 12px;
+  border-radius: 12px;
+  background: #f5f8ff;
+  font-size: 12px;
+  line-height: 1.45;
+  overflow-x: auto;
+}
+
+.settings-queue-env-card {
+  margin-bottom: 20px;
 }
