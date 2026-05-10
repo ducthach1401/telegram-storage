@@ -7,6 +7,7 @@ import { TelegramService } from '../telegram/telegram.service';
 import { StorageService } from '../storage.service';
 import { EnvKey } from '../../common/env-keys';
 import { UploadDefaults } from '../../common/upload.defaults';
+import { StorageExceptionMessage } from '../../common/api-messages';
 import {
   BullMqWorkerEvent,
   FILE_UPLOAD_QUEUE,
@@ -77,6 +78,15 @@ export class FileUploadProcessor extends WorkerHost {
         throw new UnrecoverableError(
           'Telegram Bot token không hợp lệ hoặc đã bị revoke (401 Unauthorized). Kiểm tra TELEGRAM_BOT_TOKEN trong .env rồi restart container.',
         );
+      }
+      if (message.includes(StorageExceptionMessage.FILE_DUPLICATE_NAME)) {
+        const existing = await this.storage.findActiveFileByName(folderId, finalFileName);
+        if (existing) {
+          this.log.log(
+            `Upload job bỏ qua file trùng tên: ${finalFileName} trong folder ${folderId}`,
+          );
+          return existing;
+        }
       }
       throw err;
     }

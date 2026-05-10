@@ -15,6 +15,8 @@ const i18n = {
     brandSubtitle: "Cloud qua Telegram",
     upload: "Tải lên",
     uploadFiles: "Tải file lên",
+    uploadMedia: "Thư viện ảnh/video",
+    uploadFileManager: "Quản lý file",
     uploadFolder: "Tải folder lên",
     mergeFolder: "Merge",
     renameFolderCopy: "Tạo folder (1)",
@@ -157,6 +159,8 @@ const i18n = {
     brandSubtitle: "Cloud through Telegram",
     upload: "Upload",
     uploadFiles: "Upload files",
+    uploadMedia: "Photo/video library",
+    uploadFileManager: "File manager",
     uploadFolder: "Upload folder",
     mergeFolder: "Merge",
     renameFolderCopy: "Create folder (1)",
@@ -1546,6 +1550,10 @@ function renderFileList(target, files, mode = "drive") {
     setInternalDrag(row, { type: "file", id: file.id, name: file.name });
     row.addEventListener("click", (event) => {
       if (event.target.closest(".row-actions")) return;
+      if (isTouchLikePointer()) {
+        void openFilePreview(file).catch(showError);
+        return;
+      }
       if (mode !== "trash") {
         toggleFileSelection(file.id, event);
       }
@@ -1615,6 +1623,10 @@ function renderFileList(target, files, mode = "drive") {
     list.appendChild(row);
   });
   syncSelectionBar();
+}
+
+function isTouchLikePointer() {
+  return window.matchMedia?.("(hover: none), (pointer: coarse)").matches ?? false;
 }
 
 function attachContextMenu(row, menuButton, items) {
@@ -1716,7 +1728,7 @@ async function openFilePreview(file) {
     };
     if (previewToken !== state.previewToken) return;
     img.src = viewUrl;
-    body.appendChild(img);
+    body.appendChild(createZoomableImagePreview(img));
     return;
   }
   if (file.mimeType?.startsWith("video/")) {
@@ -1788,6 +1800,71 @@ async function openFilePreview(file) {
   const btn = actionButton(t("download"), "", () => downloadWithAuth(downloadUrl, file.name));
   unsupported.appendChild(btn);
   body.appendChild(unsupported);
+}
+
+function createZoomableImagePreview(img) {
+  const wrap = document.createElement("div");
+  wrap.className = "image-preview";
+  const stage = document.createElement("div");
+  stage.className = "image-preview-stage";
+  const controls = document.createElement("div");
+  controls.className = "image-zoom-controls";
+  const zoomOut = actionButton("-", "", () => setZoom(zoom - 0.25));
+  const zoomReset = actionButton("100%", "", () => setZoom(1));
+  const zoomIn = actionButton("+", "", () => setZoom(zoom + 0.25));
+  controls.append(zoomOut, zoomReset, zoomIn);
+  stage.appendChild(img);
+  wrap.append(stage, controls);
+
+  let zoom = 1;
+  let pinchStartDistance = 0;
+  let pinchStartZoom = 1;
+
+  const applyZoom = () => {
+    img.style.transform = `scale(${zoom})`;
+    zoomReset.textContent = `${Math.round(zoom * 100)}%`;
+    zoomOut.disabled = zoom <= 0.5;
+    zoomIn.disabled = zoom >= 5;
+  };
+  const setZoom = (nextZoom) => {
+    zoom = Math.min(5, Math.max(0.5, Number(nextZoom) || 1));
+    applyZoom();
+  };
+  const touchDistance = (touches) => {
+    const [a, b] = touches;
+    return Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+  };
+
+  stage.addEventListener(
+    "wheel",
+    (event) => {
+      if (!event.ctrlKey && Math.abs(event.deltaY) < 20) return;
+      event.preventDefault();
+      setZoom(zoom + (event.deltaY < 0 ? 0.2 : -0.2));
+    },
+    { passive: false },
+  );
+  stage.addEventListener("dblclick", () => setZoom(zoom === 1 ? 2 : 1));
+  stage.addEventListener(
+    "touchstart",
+    (event) => {
+      if (event.touches.length !== 2) return;
+      pinchStartDistance = touchDistance(event.touches);
+      pinchStartZoom = zoom;
+    },
+    { passive: true },
+  );
+  stage.addEventListener(
+    "touchmove",
+    (event) => {
+      if (event.touches.length !== 2 || !pinchStartDistance) return;
+      event.preventDefault();
+      setZoom(pinchStartZoom * (touchDistance(event.touches) / pinchStartDistance));
+    },
+    { passive: false },
+  );
+  applyZoom();
+  return wrap;
 }
 
 function showTelegramFallback(file, previewToken = state.previewToken) {
@@ -2067,6 +2144,13 @@ function folderMenuItems() {
 }
 
 function uploadMenuItems() {
+  if (isTouchLikePointer()) {
+    return [
+      { label: t("uploadMedia"), handler: () => $("#mediaInput").click() },
+      { label: t("uploadFileManager"), handler: () => $("#fileInput").click() },
+      { label: t("uploadFolder"), handler: () => uploadFolderFromPicker() },
+    ];
+  }
   return [
     { label: t("uploadFiles"), handler: () => $("#fileInput").click() },
     { label: t("uploadFolder"), handler: () => uploadFolderFromPicker() },
@@ -2992,6 +3076,11 @@ function wireEvents() {
     event.target.value = "";
     void uploadFiles(files).catch(showError);
   });
+  $("#mediaInput").addEventListener("change", (event) => {
+    const files = Array.from(event.target.files || []);
+    event.target.value = "";
+    void uploadFiles(files).catch(showError);
+  });
   $("#folderInput").addEventListener("change", (event) => {
     const files = Array.from(event.target.files || []);
     event.target.value = "";
@@ -3114,7 +3203,15 @@ function showError(err) {
   toast(`${err.message || String(err)} · ${t("authHint")}`);
 }
 
+function registerServiceWorker() {
+  if (!("serviceWorker" in navigator)) return;
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("/sw.js").catch(() => undefined);
+  });
+}
+
 async function init() {
+  registerServiceWorker();
   restoreNavigationState();
   applyLanguage();
   persistAuthCookie();

@@ -1,13 +1,15 @@
 import { createReadStream } from 'fs';
-import { Injectable, OnModuleInit } from '@nestjs/common';
+import { Injectable, Logger, OnApplicationBootstrap, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Bot, InputFile } from 'grammy';
 import { TelegramIntegrationMessage } from '../../common/api-messages';
+import { API_V1_PREFIX } from '../../common/api-route';
 import { EnvKey } from '../../common/env-keys';
 import {
   TELEGRAM_DOCUMENT_THUMB_FILENAME,
   TELEGRAM_FILE_API_BASE,
 } from '../telegram.constants';
+import { TelegramWebhookPath } from '../storage-http.constants';
 
 interface TelegramFileLike {
   file_id?: string;
@@ -24,7 +26,8 @@ interface UploadedTelegramFile {
 }
 
 @Injectable()
-export class TelegramService implements OnModuleInit {
+export class TelegramService implements OnModuleInit, OnApplicationBootstrap {
+  private readonly logger = new Logger(TelegramService.name);
   private bot!: Bot;
   private chatId!: string;
 
@@ -34,6 +37,37 @@ export class TelegramService implements OnModuleInit {
     const token = this.config.getOrThrow<string>(EnvKey.TELEGRAM_BOT_TOKEN);
     this.chatId = this.config.getOrThrow<string>(EnvKey.TELEGRAM_STORAGE_CHAT_ID);
     this.bot = new Bot(token);
+  }
+
+  async onApplicationBootstrap(): Promise<void> {
+    if (process.env.NODE_ENV !== 'production') {
+      this.logger.log('Skipping Telegram webhook setup outside production.');
+      return;
+    }
+    await this.setupWebhookFromEnv();
+  }
+
+  private async setupWebhookFromEnv(): Promise<void> {
+    const publicAppUrl = this.config
+      .get<string>(EnvKey.PUBLIC_APP_URL)
+      ?.trim()
+      .replace(/\/+$/, '');
+    if (!publicAppUrl) {
+      this.logger.warn('PUBLIC_APP_URL is empty; skipping Telegram webhook setup.');
+      return;
+    }
+
+    const webhookUrl = `${publicAppUrl}/${API_V1_PREFIX}/${TelegramWebhookPath}`;
+    const secretToken = this.config.get<string>(EnvKey.TELEGRAM_WEBHOOK_SECRET)?.trim();
+    try {
+      await this.bot.api.setWebhook(webhookUrl, {
+        ...(secretToken ? { secret_token: secretToken } : {}),
+        allowed_updates: ['message', 'channel_post'],
+      });
+      this.logger.log(`Telegram webhook set to ${webhookUrl}`);
+    } catch (err) {
+      this.logger.error('Telegram webhook setup failed', err);
+    }
   }
 
   async uploadDocument(

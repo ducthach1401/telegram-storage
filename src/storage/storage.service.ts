@@ -476,6 +476,10 @@ export class StorageService implements OnModuleInit {
 
     const size = buffer.length;
     const contentSha256 = StorageService.sha256Buffer(buffer);
+    const existingImage = await this.findActiveImageByContentHash(mimeType, contentSha256);
+    if (existingImage) {
+      return existingImage;
+    }
     const objectKey = this.shouldStoreInMinio(size) ? this.buildMinioObjectKey(fileName) : null;
     if (objectKey) {
       await this.assertMinioCapacity(size);
@@ -538,6 +542,10 @@ export class StorageService implements OnModuleInit {
     }
 
     const contentSha256 = await StorageService.sha256File(path);
+    const existingImage = await this.findActiveImageByContentHash(mimeType, contentSha256);
+    if (existingImage) {
+      return existingImage;
+    }
     const objectKey = this.shouldStoreInMinio(size) ? this.buildMinioObjectKey(fileName) : null;
     if (objectKey) {
       await this.assertMinioCapacity(size);
@@ -933,6 +941,31 @@ export class StorageService implements OnModuleInit {
 
   async getFileForRead(id: string, includeTrashed = false): Promise<StoredFile> {
     return includeTrashed ? this.getTrashedFile(id) : this.getFile(id);
+  }
+
+  async findActiveFileByName(folderId: string, name: string): Promise<StoredFile | null> {
+    return this.fileRepo.findOne({
+      where: { folderId, name, deletedAt: IsNull() },
+      relations: { tags: true },
+    });
+  }
+
+  private async findActiveImageByContentHash(
+    mimeType: string,
+    contentSha256: string,
+  ): Promise<StoredFile | null> {
+    if (!mimeType.startsWith(MIME_PREFIX_IMAGE)) {
+      return null;
+    }
+    return this.fileRepo
+      .createQueryBuilder('f')
+      .leftJoinAndSelect('f.tags', 'tag')
+      .where('f.deletedAt IS NULL')
+      .andWhere('f.contentSha256 = :contentSha256', { contentSha256 })
+      .andWhere('f.mimeType LIKE :imagePrefix', { imagePrefix: `${MIME_PREFIX_IMAGE}%` })
+      .orderBy('f.createdAt', TYPEORM_ORDER_ASC)
+      .addOrderBy('f.id', TYPEORM_ORDER_ASC)
+      .getOne();
   }
 
   private async getTrashedFile(id: string): Promise<StoredFile> {
