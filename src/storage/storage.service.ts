@@ -7,6 +7,7 @@ import {
   BadRequestException,
   ConflictException,
   Injectable,
+  Logger,
   NotFoundException,
   OnModuleInit,
 } from '@nestjs/common';
@@ -123,6 +124,8 @@ function createZipArchive(): archiver.Archiver {
 
 @Injectable()
 export class StorageService implements OnModuleInit {
+  private readonly logger = new Logger(StorageService.name);
+
   constructor(
     @InjectRepository(Folder)
     private readonly folderRepo: Repository<Folder>,
@@ -158,7 +161,7 @@ export class StorageService implements OnModuleInit {
     if (!acc) {
       throw new NotFoundException(StorageExceptionMessage.FOLDER_NOT_FOUND);
     }
-    return storageTenantFromAccount(acc);
+    return storageTenantFromAccount(acc, this.accountBootstrap.getPlatformTelegramMergeDefaultsSync());
   }
 
   async resolveTenantForFolder(folderId: string): Promise<StorageTenant> {
@@ -170,7 +173,7 @@ export class StorageService implements OnModuleInit {
     if (!acc) {
       throw new NotFoundException(StorageExceptionMessage.FOLDER_NOT_FOUND);
     }
-    return storageTenantFromAccount(acc);
+    return storageTenantFromAccount(acc, this.accountBootstrap.getPlatformTelegramMergeDefaultsSync());
   }
 
   resolveFolderId(t: StorageTenant, folderParam: string): string {
@@ -1226,6 +1229,9 @@ export class StorageService implements OnModuleInit {
         object.body.pipe(res);
         return;
       } catch (err) {
+        this.logger.warn(
+          `MinIO stream failed file=${storedFileId} key=${f.s3ObjectKey}: ${StorageService.errorDetail(err)}`,
+        );
         if (!f.telegramFileId) {
           throw err;
         }
@@ -1274,6 +1280,9 @@ export class StorageService implements OnModuleInit {
       }
       await StorageService.sleep(250 * (attempt + 1));
     }
+    this.logger.warn(
+      `Telegram CDN exhausted retries telegramFileId=${fileId} detail=${StorageService.errorDetail(lastError)}`,
+    );
     throw new BadGatewayException({
       message: ApiExceptionMessage.TELEGRAM_FILE_DOWNLOAD_FAILED,
       detail: StorageService.errorDetail(lastError),
