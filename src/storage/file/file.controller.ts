@@ -68,6 +68,8 @@ import {
 } from '../domain/dto/file-meta-batch.dto';
 import { FileMetaResponseDto } from '../domain/dto/file-meta-response.dto';
 import { FileTagsResponseDto, UpdateFileTagsDto } from '../domain/dto/file-tags.dto';
+import { FolderContentsResponseDto } from '../domain/dto/folder-contents-response.dto';
+import { FolderResponseDto } from '../domain/dto/folder-response.dto';
 import { StoredFileSummaryDto } from '../domain/dto/stored-file-summary.dto';
 import { StorageQuotaResponseDto } from '../domain/dto/storage-quota-response.dto';
 import { TrashedFileDto, TrashedFolderDto, TrashListResponseDto } from '../domain/dto/trash-response.dto';
@@ -129,6 +131,22 @@ export class FileController {
     };
   }
 
+  @Get(`${FileRoutePath.TRASH}/folders/:id/contents`)
+  @ApiOperation({ summary: 'Danh sách nội dung folder trong thùng rác' })
+  @ApiParam({ name: 'id', format: 'uuid' })
+  @ApiOkResponse({ type: FolderContentsResponseDto })
+  @ApiNotFoundResponse({ description: 'Không tìm thấy folder trong thùng rác' })
+  async trashFolderContents(
+    @Param('id', ParseUUIDPipe) id: string,
+  ): Promise<FolderContentsResponseDto> {
+    const contents = await this.storage.listTrashFolderContents(id);
+    return {
+      folderId: contents.folderId,
+      folders: contents.folders.map((folder) => FileController.toFolderForTrashView(folder)),
+      files: contents.files.map((file) => FileController.toSummary(file)),
+    };
+  }
+
   @Delete(FileRoutePath.TRASH)
   @HttpCode(HttpStatus.NO_CONTENT)
   @ApiOperation({ summary: 'Xóa sạch thùng rác' })
@@ -182,6 +200,63 @@ export class FileController {
   @ApiNotFoundResponse({ description: 'Không tìm thấy file trong thùng rác' })
   async permanentlyRemoveFromTrash(@Param('id', ParseUUIDPipe) id: string) {
     await this.storage.permanentlyDeleteFile(id);
+  }
+
+  @Get(`${FileRoutePath.TRASH}/:id/download`)
+  @ApiOperation({ summary: 'Tải file trong thùng rác (Content-Disposition: attachment)' })
+  @ApiParam({ name: 'id', format: 'uuid' })
+  @ApiProduces('application/octet-stream')
+  @ApiBadGatewayResponse({ description: 'Không tải được từ Telegram' })
+  async downloadFromTrash(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Res({ passthrough: false }) res: Response,
+  ) {
+    await this.storage.streamOriginalToExpressResponse(
+      id,
+      res,
+      ContentDispositionMode.ATTACHMENT,
+      { includeTrashed: true },
+    );
+  }
+
+  @Get(`${FileRoutePath.TRASH}/:id/view`)
+  @ApiOperation({ summary: 'Xem file trong thùng rác inline (Content-Disposition: inline)' })
+  @ApiParam({ name: 'id', format: 'uuid' })
+  @ApiProduces('application/octet-stream', 'image/*', 'application/pdf')
+  @ApiBadGatewayResponse({ description: 'Không tải được từ Telegram' })
+  async viewFromTrash(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Res({ passthrough: false }) res: Response,
+  ) {
+    await this.storage.streamOriginalToExpressResponse(
+      id,
+      res,
+      ContentDispositionMode.INLINE,
+      { includeTrashed: true },
+    );
+  }
+
+  @Get(`${FileRoutePath.TRASH}/:id/thumbnail`)
+  @ApiOperation({ summary: 'Thumbnail JPEG cho file trong thùng rác (nếu có)' })
+  @ApiParam({ name: 'id', format: 'uuid' })
+  @ApiProduces('image/jpeg')
+  @ApiNotFoundResponse({ description: 'File không có thumbnail' })
+  @ApiBadGatewayResponse({ description: 'Không tải được từ Telegram' })
+  async thumbnailFromTrash(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Res({ passthrough: false }) res: Response,
+  ) {
+    const f = await this.storage.getFileForRead(id, true);
+    const thumbId = f.thumbnailTelegramFileId;
+    if (!thumbId) {
+      throw new NotFoundException(ApiExceptionMessage.FILE_NO_THUMBNAIL);
+    }
+    const r = await this.storage.fetchTelegramFileResponse(thumbId).catch(() => {
+      throw new BadGatewayException(ApiExceptionMessage.TELEGRAM_THUMB_DOWNLOAD_FAILED);
+    });
+    res.setHeader(HttpHeader.CONTENT_TYPE, MimeType.JPEG);
+    res.setHeader(HttpHeader.CACHE_CONTROL, CacheControlValue.PRIVATE_MONTH);
+    Readable.fromWeb(r.body as import('stream/web').ReadableStream).pipe(res);
   }
 
   @Post(FileRoutePath.UPLOAD)
@@ -643,6 +718,21 @@ export class FileController {
       deletedOriginalParentId: folder.deletedOriginalParentId,
       deletedOriginalName: folder.deletedOriginalName,
     };
+  }
+
+  private static toFolderForTrashView(folder: Folder): FolderResponseDto & Partial<TrashedFolderDto> {
+    const dto: FolderResponseDto & Partial<TrashedFolderDto> = {
+      id: folder.id,
+      parentId: folder.parentId,
+      name: folder.deletedOriginalName ?? folder.name,
+      createdAt: folder.createdAt instanceof Date ? folder.createdAt : new Date(folder.createdAt),
+    };
+    if (folder.deletedAt) {
+      dto.deletedAt = folder.deletedAt instanceof Date ? folder.deletedAt : new Date(folder.deletedAt);
+      dto.deletedOriginalParentId = folder.deletedOriginalParentId;
+      dto.deletedOriginalName = folder.deletedOriginalName;
+    }
+    return dto;
   }
 
   private static canDirectDownload(f: StoredFile): boolean {

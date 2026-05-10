@@ -302,9 +302,12 @@ const state = {
   view: "drive",
   folderId: ROOT,
   path: [{ id: ROOT, name: "root" }],
+  trashFolderId: ROOT,
+  trashPath: [],
   dragDepth: 0,
   loadingFolderId: null,
   authToken: localStorage.getItem(AUTH_STORAGE_KEY),
+  authPromptPromise: null,
   fileView: localStorage.getItem(VIEW_STORAGE_KEY) || "list",
   searchActive: false,
   driveFolders: [],
@@ -896,10 +899,11 @@ async function api(path, options = {}) {
     ...options,
     headers,
   });
-  if (res.status === 401 && !options._retriedAuth) {
-    clearAuth();
-    await ensureAuth();
-    return api(path, { ...options, _retriedAuth: true });
+  if (res.status === 401) {
+    await forceReauth();
+    if (!options._retriedAuth) {
+      return api(path, { ...options, _retriedAuth: true });
+    }
   }
   if (!res.ok) {
     let detail = "";
@@ -926,6 +930,14 @@ function clearAuth() {
   }
 }
 
+async function forceReauth() {
+  clearAuth();
+  hideContextMenu();
+  closeFilePreview();
+  toast(t("loginInvalid"));
+  return ensureAuth();
+}
+
 function persistAuthCookie() {
   if (!state.authToken) return;
   document.cookie = `tg_drive_auth=${encodeURIComponent(state.authToken)}; Path=/; Max-Age=31536000; SameSite=Lax`;
@@ -933,7 +945,8 @@ function persistAuthCookie() {
 
 function ensureAuth() {
   if (state.authToken) return Promise.resolve(state.authToken);
-  return new Promise((resolve) => {
+  if (state.authPromptPromise) return state.authPromptPromise;
+  state.authPromptPromise = new Promise((resolve) => {
     const backdrop = $("#authBackdrop");
     const form = $("#authModal");
     const user = $("#authUser");
@@ -956,10 +969,12 @@ function ensureAuth() {
       persistAuthCookie();
       pass.value = "";
       backdrop.classList.add("hidden");
+      state.authPromptPromise = null;
       resolve(token);
     };
     setTimeout(() => user.focus(), 0);
   });
+  return state.authPromptPromise;
 }
 
 async function verifyAuthToken(token) {
@@ -1295,7 +1310,7 @@ function fileIcon(file) {
 }
 
 async function loadThumbnail(container, file, mode) {
-  if (!container || mode === "trash" || !file.thumbnailTelegramFileId) {
+  if (!container || !file.thumbnailTelegramFileId) {
     return;
   }
   try {
@@ -1306,12 +1321,12 @@ async function loadThumbnail(container, file, mode) {
     img.onload = () => img.classList.remove("loading");
     img.onerror = async () => {
       try {
-        img.src = await objectUrlWithAuth(`/api/v1/files/${file.id}/thumbnail`, { cache: true });
+        img.src = await objectUrlWithAuth(fileThumbnailUrl(file), { cache: true });
       } catch {
         container.textContent = fileIcon(file);
       }
     };
-    img.src = fileThumbnailUrl(file.id);
+    img.src = fileThumbnailUrl(file);
     container.textContent = "";
     container.appendChild(img);
   } catch {
@@ -1507,7 +1522,7 @@ function renderFileList(target, files, mode = "drive") {
   if (mode === "drive") {
     state.driveFiles = files;
   }
-  if (mode !== "trash" && (mode !== "drive" || !state.searchActive)) {
+  if (mode === "trash" || (mode !== "drive" || !state.searchActive)) {
     state.visibleFiles = files;
   }
   if (mode !== "trash" && (mode !== "drive" || !state.searchActive)) {
@@ -1529,19 +1544,21 @@ function renderFileList(target, files, mode = "drive") {
     row.classList.toggle("selected", state.selectedFileIds.has(file.id));
     row.draggable = true;
     setInternalDrag(row, { type: "file", id: file.id, name: file.name });
-    if (mode !== "trash") {
-      row.addEventListener("click", (event) => {
-        if (event.target.closest(".row-actions")) return;
+    row.addEventListener("click", (event) => {
+      if (event.target.closest(".row-actions")) return;
+      if (mode !== "trash") {
         toggleFileSelection(file.id, event);
-      });
-      row.addEventListener("dblclick", (event) => {
-        if (event.target.closest(".row-actions")) return;
+      }
+    });
+    row.addEventListener("dblclick", (event) => {
+      if (event.target.closest(".row-actions")) return;
+      if (mode !== "trash") {
         state.selectedFileIds.add(file.id);
         syncSelectedRows();
         syncSelectionBar();
-        void openFilePreview(file).catch(showError);
-      });
-    }
+      }
+      void openFilePreview(file).catch(showError);
+    });
     const tags = (file.tags || []).map((tag) => `<span class="tag">${escapeHtml(tag)}</span>`).join("");
     const uploadedAt = formatUploadedAt(file.createdAt);
     const cardMeta = [formatBytes(file.size), uploadedAt].filter(Boolean).join(" · ");
@@ -1563,25 +1580,34 @@ function renderFileList(target, files, mode = "drive") {
 
     if (mode === "trash") {
       const items = [
-        {
-          label: t("restore"),
-          variant: "success",
-          handler: async () => {
-          await api(`/files/trash/${file.id}/restore?duplicatePolicy=suffix`, { method: "POST" });
-          toast(t("restored"));
-          await Promise.all([loadTrash(), loadQuota()]);
-          },
-        },
-        {
-          label: t("permanentDelete"),
-          variant: "danger",
-          handler: async () => {
-          await api(`/files/trash/${file.id}`, { method: "DELETE" });
-          toast(t("deleted"));
-          await Promise.all([loadTrash(), loadQuota()]);
-          },
-        },
+        { label: t("openFile"), handler: () => openFilePreview(file) },
+        { label: t("download"), handler: () => downloadFile(file) },
+        ...(file.thumbnailTelegramFileId
+          ? [{ label: t("thumb"), handler: () => openThumbnailPreview(file) }]
+          : []),
       ];
+      if (file.deletedAt) {
+        items.push(
+          {
+            label: t("restore"),
+            variant: "success",
+            handler: async () => {
+              await api(`/files/trash/${file.id}/restore?duplicatePolicy=suffix`, { method: "POST" });
+              toast(t("restored"));
+              await Promise.all([loadTrash(), loadQuota()]);
+            },
+          },
+          {
+            label: t("permanentDelete"),
+            variant: "danger",
+            handler: async () => {
+              await api(`/files/trash/${file.id}`, { method: "DELETE" });
+              toast(t("deleted"));
+              await Promise.all([loadTrash(), loadQuota()]);
+            },
+          },
+        );
+      }
       attachContextMenu(row, menuButton, items);
     } else {
       attachContextMenu(row, menuButton, () => contextMenuItemsForItem("file", file));
@@ -1639,16 +1665,22 @@ function hideContextMenu() {
   $("#contextMenu").classList.add("hidden");
 }
 
-function fileViewUrl(fileId) {
-  return `/api/v1/files/${fileId}/view?appAuth=1`;
+function fileAccessBase(fileOrId) {
+  const fileId = typeof fileOrId === "object" ? fileOrId.id : fileOrId;
+  const trashPrefix = typeof fileOrId === "object" && fileOrId.deletedAt ? "/trash" : "";
+  return `/api/v1/files${trashPrefix}/${fileId}`;
 }
 
-function fileDownloadUrl(fileId) {
-  return `/api/v1/files/${fileId}/download?appAuth=1`;
+function fileViewUrl(fileOrId) {
+  return `${fileAccessBase(fileOrId)}/view?appAuth=1`;
 }
 
-function fileThumbnailUrl(fileId) {
-  return `/api/v1/files/${fileId}/thumbnail?appAuth=1`;
+function fileDownloadUrl(fileOrId) {
+  return `${fileAccessBase(fileOrId)}/download?appAuth=1`;
+}
+
+function fileThumbnailUrl(fileOrId) {
+  return `${fileAccessBase(fileOrId)}/thumbnail?appAuth=1`;
 }
 
 async function openFilePreview(file) {
@@ -1658,8 +1690,8 @@ async function openFilePreview(file) {
     showTelegramFallback(file, previewToken);
     return;
   }
-  const viewUrl = fileViewUrl(file.id);
-  const downloadUrl = fileDownloadUrl(file.id);
+  const viewUrl = fileViewUrl(file);
+  const downloadUrl = fileDownloadUrl(file);
   const body = $("#viewerBody");
   $("#viewerTitle").textContent = file.name;
   $("#viewerMeta").textContent = `${file.mimeType || ""} · ${formatBytes(file.size)}`;
@@ -1785,7 +1817,7 @@ async function downloadFile(file) {
     return;
   }
   try {
-    await downloadWithAuth(fileDownloadUrl(file.id), file.name);
+    await downloadWithAuth(fileDownloadUrl(file), file.name);
   } catch (err) {
     if (isTransferCanceled(err)) return;
     if (file.telegramMessageUrl) {
@@ -1811,10 +1843,11 @@ async function fetchWithAuth(url, options = {}) {
   headers["X-Auth-Mode"] = "app";
   headers.Authorization = `Basic ${state.authToken}`;
   const res = await fetch(url, { ...options, headers });
-  if (res.status === 401 && !options._retriedAuth) {
-    clearAuth();
-    await ensureAuth();
-    return fetchWithAuth(url, { ...options, _retriedAuth: true });
+  if (res.status === 401) {
+    await forceReauth();
+    if (!options._retriedAuth) {
+      return fetchWithAuth(url, { ...options, _retriedAuth: true });
+    }
   }
   return res;
 }
@@ -1943,11 +1976,11 @@ async function openThumbnailPreview(file) {
   $("#viewerTitle").textContent = `${file.name} · ${t("thumb")}`;
   $("#viewerMeta").textContent = "image/jpeg";
   $("#viewerDownloadButton").onclick = () =>
-    void downloadWithAuth(fileThumbnailUrl(file.id), `${file.name}.thumb.jpg`).catch(showError);
+    void downloadWithAuth(fileThumbnailUrl(file), `${file.name}.thumb.jpg`).catch(showError);
   body.innerHTML = "";
   $("#viewerBackdrop").classList.remove("hidden");
   const img = document.createElement("img");
-  img.src = fileThumbnailUrl(file.id);
+  img.src = fileThumbnailUrl(file);
   img.alt = file.name;
   body.appendChild(img);
 }
@@ -2099,13 +2132,85 @@ function syncFolderActions() {
   $("#folderMenuButton").title = t("rightClickHint");
 }
 
-async function loadTrash() {
-  const data = await api("/files/trash?limit=200");
+async function loadTrash(folderId = state.trashFolderId) {
+  const isRoot = folderId === ROOT;
+  const data = await api(
+    isRoot ? "/files/trash?limit=200" : `/files/trash/folders/${encodeURIComponent(folderId)}/contents`,
+  );
+  state.trashFolderId = folderId;
+  if (isRoot) {
+    state.trashPath = [];
+  }
+  renderTrashBreadcrumbs();
   renderTrashFolders(data.folders || []);
-  renderFileList("#trashList", data.items || [], "trash");
-  if ((data.folders || []).length && !(data.items || []).length) {
+  const files = trashFilesFromResponse(data);
+  renderFileList("#trashList", files, "trash");
+  if ((data.folders || []).length && !files.length) {
     $("#trashList").innerHTML = "";
   }
+}
+
+function trashFilesFromResponse(data) {
+  return data.items || data.files || [];
+}
+
+function renderTrashBreadcrumbs() {
+  const view = $("#trashView");
+  let row = $("#trashBreadcrumbRow");
+  if (!row) {
+    row = document.createElement("div");
+    row.id = "trashBreadcrumbRow";
+    row.className = "path-row";
+    row.innerHTML = `
+      <button class="ghost path-back" id="trashBackButton" title="Back">←</button>
+      <div class="breadcrumbs" id="trashBreadcrumbs"></div>
+    `;
+    view.querySelector(".panel-head").after(row);
+    $("#trashBackButton").addEventListener("click", () => {
+      if (state.trashPath.length <= 1) {
+        state.trashPath = [];
+        void loadTrash(ROOT).catch(showError);
+        return;
+      }
+      state.trashPath.pop();
+      const parent = state.trashPath[state.trashPath.length - 1];
+      void loadTrash(parent.id).catch(showError);
+    });
+  }
+  $("#trashBackButton").disabled = state.trashFolderId === ROOT;
+  const crumbs = $("#trashBreadcrumbs");
+  crumbs.innerHTML = "";
+  const rootBtn = document.createElement("button");
+  rootBtn.type = "button";
+  rootBtn.textContent = t("trash");
+  rootBtn.addEventListener("click", () => {
+    state.trashPath = [];
+    void loadTrash(ROOT).catch(showError);
+  });
+  crumbs.appendChild(rootBtn);
+  state.trashPath.forEach((folder, index) => {
+    const sep = document.createElement("span");
+    sep.textContent = "/";
+    crumbs.appendChild(sep);
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.textContent = folder.name;
+    btn.addEventListener("click", () => {
+      state.trashPath = state.trashPath.slice(0, index + 1);
+      void loadTrash(folder.id).catch(showError);
+    });
+    crumbs.appendChild(btn);
+  });
+}
+
+function openTrashFolder(folder) {
+  const existingIndex = state.trashPath.findIndex((item) => item.id === folder.id);
+  if (existingIndex >= 0) {
+    state.trashPath = state.trashPath.slice(0, existingIndex + 1);
+  } else {
+    state.trashPath.push({ id: folder.id, name: folder.name });
+  }
+  void loadTrash(folder.id).catch(showError);
 }
 
 function renderTrashFolders(folders) {
@@ -2122,26 +2227,33 @@ function renderTrashFolders(folders) {
     btn.disabled = state.processingFolderIds.has(folder.id);
     btn.innerHTML = `<img class="folder-icon" src="/folder.png" alt="" /><strong></strong>`;
     btn.querySelector("strong").textContent = folder.name;
-    attachContextMenu(btn, btn, () => [
-      {
-        label: t("restore"),
-        variant: "success",
-        handler: async () => {
-          await api(`/files/trash/folders/${folder.id}/restore`, { method: "POST" });
-          toast(t("restored"));
-          await Promise.all([loadTrash(), loadQuota(), loadDrive()]);
-        },
-      },
-      {
-        label: t("permanentDelete"),
-        variant: "danger",
-        handler: async () => {
-          await api(`/files/trash/folders/${folder.id}`, { method: "DELETE" });
-          toast(t("deleted"));
-          await Promise.all([loadTrash(), loadQuota()]);
-        },
-      },
-    ]);
+    btn.addEventListener("click", () => openTrashFolder(folder));
+    attachContextMenu(btn, btn, () => {
+      const items = [{ label: t("open"), handler: () => openTrashFolder(folder) }];
+      if (folder.deletedAt) {
+        items.push(
+          {
+            label: t("restore"),
+            variant: "success",
+            handler: async () => {
+              await api(`/files/trash/folders/${folder.id}/restore`, { method: "POST" });
+              toast(t("restored"));
+              await Promise.all([loadTrash(), loadQuota(), loadDrive()]);
+            },
+          },
+          {
+            label: t("permanentDelete"),
+            variant: "danger",
+            handler: async () => {
+              await api(`/files/trash/folders/${folder.id}`, { method: "DELETE" });
+              toast(t("deleted"));
+              await Promise.all([loadTrash(), loadQuota()]);
+            },
+          },
+        );
+      }
+      return items;
+    });
     grid.appendChild(btn);
   });
 }
@@ -2289,7 +2401,7 @@ async function uploadFileRecord(record) {
   return queued;
 }
 
-async function uploadWithProgress(path, form, file, transferId = createTransfer("upload", file.name)) {
+async function uploadWithProgress(path, form, file, transferId = createTransfer("upload", file.name), retriedAuth = false) {
   await ensureAuth();
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
@@ -2318,6 +2430,18 @@ async function uploadWithProgress(path, form, file, transferId = createTransfer(
       if (xhr.status >= 200 && xhr.status < 300) {
         updateTransfer(transferId, { status: t("processing"), speed: 0, loaded: file.size, total: file.size, cancelable: false });
         resolve({ ...JSON.parse(xhr.responseText), transferId });
+        return;
+      }
+      if (xhr.status === 401) {
+        updateTransfer(transferId, { status: t("loginInvalid"), error: true, speed: 0, cancelable: true });
+        void forceReauth()
+          .then(() => {
+            if (retriedAuth) {
+              throw new Error(`${xhr.status}: ${xhr.responseText || xhr.statusText}`);
+            }
+            return uploadWithProgress(path, form, file, transferId, true);
+          })
+          .then(resolve, reject);
         return;
       }
       updateTransfer(transferId, { status: `HTTP ${xhr.status}`, error: true, speed: 0, cancelable: true });

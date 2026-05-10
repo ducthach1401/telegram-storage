@@ -783,6 +783,35 @@ export class StorageService implements OnModuleInit {
     });
   }
 
+  async listTrashFolderContents(folderId: string): Promise<{
+    folderId: string;
+    folders: Folder[];
+    files: StoredFile[];
+  }> {
+    const folder = await this.folderRepo.findOne({ where: { id: folderId } });
+    if (!folder || !(await this.isFolderInTrashBranch(folder))) {
+      throw new NotFoundException(StorageExceptionMessage.FOLDER_NOT_FOUND);
+    }
+
+    const [folders, files] = await Promise.all([
+      this.folderRepo.find({
+        where: { parentId: folderId },
+        order: { name: TYPEORM_ORDER_ASC },
+      }),
+      this.fileRepo.find({
+        where: { folderId },
+        relations: { tags: true },
+        order: { name: TYPEORM_ORDER_ASC },
+      }),
+    ]);
+
+    return {
+      folderId,
+      folders,
+      files: this.decorateFilesForClient(files),
+    };
+  }
+
   async restoreFile(id: string, policy: DuplicateNamePolicy): Promise<StoredFile> {
     const file = await this.getTrashedFile(id);
     let targetFolderId = file.deletedOriginalFolderId ?? file.folderId;
@@ -902,6 +931,10 @@ export class StorageService implements OnModuleInit {
     return file;
   }
 
+  async getFileForRead(id: string, includeTrashed = false): Promise<StoredFile> {
+    return includeTrashed ? this.getTrashedFile(id) : this.getFile(id);
+  }
+
   private async getTrashedFile(id: string): Promise<StoredFile> {
     const file = await this.fileRepo.findOne({
       where: { id, deletedAt: Not(IsNull()) },
@@ -921,6 +954,22 @@ export class StorageService implements OnModuleInit {
       throw new NotFoundException(StorageExceptionMessage.FOLDER_NOT_FOUND);
     }
     return folder;
+  }
+
+  private async isFolderInTrashBranch(folder: Folder): Promise<boolean> {
+    let current: Folder | null = folder;
+    const visited = new Set<string>();
+    while (current) {
+      if (current.deletedAt) {
+        return true;
+      }
+      if (!current.parentId || current.parentId === ROOT_FOLDER_ID || visited.has(current.parentId)) {
+        return false;
+      }
+      visited.add(current.parentId);
+      current = await this.folderRepo.findOne({ where: { id: current.parentId } });
+    }
+    return false;
   }
 
   private buildTrashFileName(file: StoredFile): string {
@@ -956,8 +1005,9 @@ export class StorageService implements OnModuleInit {
     storedFileId: string,
     res: Response,
     disposition: (typeof ContentDispositionMode)[keyof typeof ContentDispositionMode],
+    opts: { includeTrashed?: boolean } = {},
   ): Promise<void> {
-    const f = await this.getFile(storedFileId);
+    const f = await this.getFileForRead(storedFileId, opts.includeTrashed);
     if (f.s3ObjectKey) {
       try {
         const object = await this.minio.getObject(f.s3ObjectKey);
