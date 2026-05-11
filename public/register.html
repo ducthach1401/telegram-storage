@@ -7,6 +7,11 @@
     <title>Đăng ký · Telegram Drive</title>
     <link rel="icon" href="/logo.png" type="image/png" />
     <link rel="stylesheet" href="/styles.css" />
+    <script>
+      if (new URLSearchParams(location.search).get("bootstrap") === "admin") {
+        document.documentElement.classList.add("register-bootstrap-admin");
+      }
+    </script>
   </head>
   <body class="auth-page-body">
     <div class="auth-page-stack">
@@ -22,9 +27,6 @@
         <div class="modal-head">
           <h1 id="registerTitle">Đăng ký</h1>
         </div>
-        <p class="modal-description" id="registerDescription">
-          <strong>Lần đầu cài đặt:</strong> tài khoản đăng ký đầu tiên là <strong>admin</strong> — có thể để trống Bot token / Chat ID và cấu hình sau trong Cài đặt. Các tài khoản sau là user (quota MinIO 0 trừ khi admin chỉnh).
-        </p>
         <div id="registerAlert" class="auth-alert" hidden></div>
 
         <label class="modal-field">
@@ -36,11 +38,13 @@
           <input id="regPass" name="password" type="password" autocomplete="new-password" required minlength="6" />
         </label>
 
-        <label class="modal-field modal-field-row">
-          <input id="regUsePlatform" name="usePlatformTelegramStorage" type="checkbox" />
-          <span>Dùng bot và kênh lưu của admin đầu tiên (chung cho nhiều tài khoản)</span>
-        </label>
-        <p class="field-hint">Admin đã cấu hình Telegram chung thì user mới có thể bật ô này. Lần đầu thường tắt và để trống token/chat, hoặc nhập bot/chat riêng.</p>
+        <div id="regUserPlatformSection">
+          <label class="modal-field modal-field-row" id="regUsePlatformRow">
+            <input id="regUsePlatform" name="usePlatformTelegramStorage" type="checkbox" checked />
+            <span>Dùng bot và kênh lưu chung với hệ thống</span>
+          </label>
+          <p class="field-hint" id="regUsePlatformHint">Bật mặc định — dùng bot/kênh đã cấu hình trên hệ thống. Tắt nếu cần bot và kênh riêng.</p>
+        </div>
 
         <div id="regTelegramCustomFields">
           <label class="modal-field">
@@ -54,6 +58,26 @@
             <input id="regChatId" name="telegramStorageChatId" type="text" spellcheck="false" placeholder="-1001234567890 hoặc chat id" />
           </label>
           <p class="field-hint">ID kênh hoặc nhóm nơi bot gửi file.</p>
+
+          <div id="regAdminBootstrapBlock" hidden>
+            <label class="modal-field">
+              <span>URL gốc ứng dụng (chia sẻ link / webhook)</span>
+              <input id="regPublicAppUrl" name="publicAppUrl" type="url" spellcheck="false" placeholder="https://drive.example.com" />
+            </label>
+            <p class="field-hint">Tự điền theo domain bạn đang mở — không dấu / cuối.</p>
+
+            <label class="modal-field">
+              <span>Chat / kênh lưu chung (cho user dùng chung)</span>
+              <input id="regPublicChatId" name="telegramStorageChatForPublicId" type="text" spellcheck="false" placeholder="-1001234567890 hoặc chat id" />
+            </label>
+            <p class="field-hint">Kênh hoặc nhóm lưu file cho user bật “dùng chung với hệ thống”.</p>
+
+            <label class="modal-field">
+              <span>Chat / kênh cảnh báo (tuỳ chọn)</span>
+              <input id="regAlertChatId" name="telegramAlertChatId" type="text" spellcheck="false" placeholder="-1001234567890 hoặc chat id" />
+            </label>
+            <p class="field-hint">Nhận tin cảnh báo lỗi server — để trống nếu chưa cần.</p>
+          </div>
         </div>
 
         <div class="modal-actions">

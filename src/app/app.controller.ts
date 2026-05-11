@@ -40,12 +40,14 @@ export class AppController {
         telegramStorageChatId: { type: "string" },
         hasTelegramBotToken: { type: "boolean" },
         isPrimaryAdmin: { type: "boolean" },
+        id: { type: "string" },
       },
     },
   })
   verifyAuth(@CurrentAccount() account: Account): {
     ok: true;
     service: string;
+    id: string;
     username: string;
     role: string;
     rootFolderId: string;
@@ -59,6 +61,7 @@ export class AppController {
     return {
       ok: true,
       service: this.app.getServiceName(),
+      id: account.id,
       username: account.username,
       role: account.role,
       rootFolderId: account.rootFolderId,

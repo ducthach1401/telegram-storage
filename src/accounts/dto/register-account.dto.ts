@@ -3,6 +3,7 @@ import { Transform, Type } from 'class-transformer';
 import {
   IsBoolean,
   IsNotEmpty,
+  IsOptional,
   IsString,
   MinLength,
   ValidateIf,
@@ -21,7 +22,7 @@ export class RegisterAccountDto {
 
   @ApiProperty({
     description:
-      'true (mặc định) = dùng bot và kênh lưu chung trên server; false = nhập telegramBotToken + telegramStorageChatId.',
+      'true (mặc định) = dùng bot và kênh lưu chung với hệ thống; false = nhập telegramBotToken + telegramStorageChatId.',
     default: true,
   })
   @Transform(({ value }) => (value === undefined ? true : Boolean(value)))
@@ -42,4 +43,31 @@ export class RegisterAccountDto {
   @IsString()
   @IsNotEmpty()
   telegramStorageChatId?: string;
+
+  @ApiProperty({
+    required: false,
+    description:
+      'Chat/kênh lưu chung (TELEGRAM_STORAGE_CHAT_FOR_PUBLIC_ID) — bắt buộc khi đăng ký admin đầu tiên.',
+  })
+  @IsString()
+  @IsOptional()
+  telegramStorageChatForPublicId?: string;
+
+  @ApiProperty({
+    required: false,
+    description:
+      'URL gốc (PUBLIC_APP_URL) — bắt buộc khi đăng ký admin đầu tiên; UI thường gửi `location.origin`.',
+  })
+  @IsString()
+  @IsOptional()
+  publicAppUrl?: string;
+
+  @ApiProperty({
+    required: false,
+    description:
+      'Chat cảnh báo (TELEGRAM_ALERT_CHAT_ID) — tuỳ chọn khi đăng ký admin đầu tiên.',
+  })
+  @IsString()
+  @IsOptional()
+  telegramAlertChatId?: string;
 }

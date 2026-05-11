@@ -28,6 +28,9 @@ export const ADMIN_PATCHABLE_KEYS = [
 
 export type AdminPatchableKey = (typeof ADMIN_PATCHABLE_KEYS)[number];
 
+/** Tập khóa Cài đặt server — khi đã có dòng DB thì `effectiveRaw` không fallback env. */
+export const ADMIN_PATCHABLE_KEY_SET = new Set<string>(ADMIN_PATCHABLE_KEYS);
+
 /** Chỉ đọc từ env khi worker khởi động — hiển thị trên UI, không PATCH DB. */
 export const ADMIN_READONLY_QUEUE_KEYS = [
   EnvKey.UPLOAD_QUEUE_CONCURRENCY,

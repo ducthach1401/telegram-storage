@@ -45,6 +45,18 @@
     }).then((res) => res.ok);
   }
 
+  function defaultPublicAppUrlFromBrowser() {
+    const origin = window.location?.origin;
+    if (!origin || !/^https?:$/i.test(window.location.protocol)) {
+      return "";
+    }
+    return origin.replace(/\/+$/, "");
+  }
+
+  function normalizePublicAppUrl(raw) {
+    return String(raw ?? "").trim().replace(/\/+$/, "");
+  }
+
   async function fetchSetupStatus() {
     try {
       const res = await fetch(`${API}/auth/setup-status`, {
@@ -59,7 +71,13 @@
   }
 
   void (async () => {
-    const { needsFirstAdmin } = await fetchSetupStatus();
+    const bootstrapAdmin =
+      new URLSearchParams(location.search).get("bootstrap") === "admin";
+    const { needsFirstAdmin: needsFirstAdminFromApi } = await fetchSetupStatus();
+    const needsFirstAdmin = needsFirstAdminFromApi || bootstrapAdmin;
+    if (needsFirstAdmin) {
+      document.documentElement.classList.add("register-bootstrap-admin");
+    }
 
     const loginForm = document.getElementById("loginForm");
     const setupCard = document.getElementById("setupFirstAdminCard");
@@ -70,21 +88,16 @@
       loginForm.hidden = true;
       setupCard.hidden = false;
       if (loginFootRegister) loginFootRegister.hidden = true;
-      if (loginSubtitle) loginSubtitle.textContent = "Khởi tạo admin đầu tiên";
+      if (loginSubtitle) loginSubtitle.textContent = "Khởi tạo admin";
     } else if (setupCard) {
       setupCard.hidden = true;
     }
 
     const registerFootLogin = document.getElementById("registerFootLogin");
     const registerTitle = document.getElementById("registerTitle");
-    const registerDescription = document.getElementById("registerDescription");
     if (needsFirstAdmin) {
       if (registerFootLogin) registerFootLogin.hidden = true;
-      if (registerTitle) registerTitle.textContent = "Đăng ký admin đầu tiên";
-      if (registerDescription) {
-        registerDescription.textContent =
-          "Chưa có tài khoản trong hệ thống. Đây là bước duy nhất để tạo admin đầu tiên; có thể để trống Bot token / Chat ID và cấu hình sau trong Cài đặt.";
-      }
+      if (registerTitle) registerTitle.textContent = "Đăng ký admin";
     }
 
     if (loginForm) {
@@ -142,20 +155,35 @@
     const registerForm = document.getElementById("registerForm");
     if (registerForm) {
       const alertEl = document.getElementById("registerAlert");
+      const regUserPlatformSection = document.getElementById("regUserPlatformSection");
+      const regAdminBootstrapBlock = document.getElementById("regAdminBootstrapBlock");
+      const regPublicAppUrl = document.getElementById("regPublicAppUrl");
 
       function syncRegisterTelegramFields() {
-        const usePlatform = document.getElementById("regUsePlatform")?.checked ?? true;
+        const initAdmin = needsFirstAdmin;
+        const usePlatform = initAdmin
+          ? false
+          : (document.getElementById("regUsePlatform")?.checked ?? true);
         const wrap = document.getElementById("regTelegramCustomFields");
         const bot = document.getElementById("regBotToken");
         const chat = document.getElementById("regChatId");
+        const publicChat = document.getElementById("regPublicChatId");
+        if (regUserPlatformSection) regUserPlatformSection.hidden = initAdmin;
+        if (regAdminBootstrapBlock) regAdminBootstrapBlock.hidden = !initAdmin;
         if (wrap) wrap.hidden = usePlatform;
-        /* Telegram có thể để trống — backend báo lỗi rõ khi không phải tài khoản đầu */
-        if (bot) bot.required = false;
-        if (chat) chat.required = false;
+        if (bot) bot.required = initAdmin;
+        if (chat) chat.required = initAdmin;
+        if (publicChat) publicChat.required = initAdmin;
+        if (regPublicAppUrl) regPublicAppUrl.required = initAdmin;
+        if (initAdmin && regPublicAppUrl && !regPublicAppUrl.value.trim()) {
+          const suggested = defaultPublicAppUrlFromBrowser();
+          if (suggested) regPublicAppUrl.value = suggested;
+        }
       }
 
       const regPlatformChk = document.getElementById("regUsePlatform");
       if (regPlatformChk) {
+        if (needsFirstAdmin) regPlatformChk.checked = false;
         syncRegisterTelegramFields();
         regPlatformChk.addEventListener("change", syncRegisterTelegramFields);
       }
@@ -164,9 +192,18 @@
         event.preventDefault();
         const username = document.getElementById("regUser").value.trim();
         const password = document.getElementById("regPass").value;
-        const usePlatformTelegramStorage = document.getElementById("regUsePlatform")?.checked ?? true;
+        const usePlatformTelegramStorage = needsFirstAdmin
+          ? false
+          : (document.getElementById("regUsePlatform")?.checked ?? true);
         const telegramBotToken = document.getElementById("regBotToken").value.trim();
         const telegramStorageChatId = document.getElementById("regChatId").value.trim();
+        const telegramStorageChatForPublicId = document
+          .getElementById("regPublicChatId")
+          ?.value.trim();
+        const publicAppUrl = normalizePublicAppUrl(
+          document.getElementById("regPublicAppUrl")?.value,
+        );
+        const telegramAlertChatId = document.getElementById("regAlertChatId")?.value.trim();
         const submit = registerForm.querySelector('button[type="submit"]');
 
         if (username.length < 2) {
@@ -175,6 +212,24 @@
         }
         if (password.length < 6) {
           showAlert(alertEl, "Mật khẩu ít nhất 6 ký tự.", true);
+          return;
+        }
+        if (
+          needsFirstAdmin &&
+          (!telegramBotToken ||
+            !telegramStorageChatId ||
+            !telegramStorageChatForPublicId ||
+            !publicAppUrl)
+        ) {
+          showAlert(
+            alertEl,
+            "Nhập đủ Bot token, Chat / kênh ID lưu file, URL gốc ứng dụng và Chat / kênh lưu chung.",
+            true,
+          );
+          return;
+        }
+        if (needsFirstAdmin && !/^https?:\/\//i.test(publicAppUrl)) {
+          showAlert(alertEl, "URL gốc ứng dụng phải bắt đầu bằng http:// hoặc https://.", true);
           return;
         }
         submit.disabled = true;
@@ -186,6 +241,13 @@
             ...(usePlatformTelegramStorage
               ? {}
               : { telegramBotToken, telegramStorageChatId }),
+            ...(needsFirstAdmin
+              ? {
+                  telegramStorageChatForPublicId,
+                  publicAppUrl,
+                  ...(telegramAlertChatId ? { telegramAlertChatId } : {}),
+                }
+              : {}),
           };
           const res = await fetch(`${API}/auth/register`, {
             method: "POST",

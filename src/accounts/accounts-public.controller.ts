@@ -58,7 +58,7 @@ export class AccountsPublicController {
   @ApiOperation({
     summary: 'Đăng ký tài khoản',
     description:
-      'Tài khoản **đầu tiên** trong DB trở thành **admin** (quota MinIO như bootstrap), có thể để trống Telegram và cấu hình sau. Các tài khoản sau là user (quota 0), theo quy tắc Telegram như mô tả.',
+      'Tài khoản **đầu tiên** trong DB trở thành **admin** (quota MinIO như bootstrap): bắt buộc bot token, chat lưu file, `publicAppUrl` (PUBLIC_APP_URL) và `telegramStorageChatForPublicId` (chat/kênh lưu chung); `telegramAlertChatId` (TELEGRAM_ALERT_CHAT_ID) tuỳ chọn. Các tài khoản sau là user (quota 0), theo quy tắc Telegram như mô tả.',
   })
   @ApiCreatedResponse({
     description: 'Đã tạo account',
@@ -78,6 +78,9 @@ export class AccountsPublicController {
       usePlatformTelegramStorage: dto.usePlatformTelegramStorage,
       telegramBotToken: dto.telegramBotToken,
       telegramStorageChatId: dto.telegramStorageChatId,
+      telegramStorageChatForPublicId: dto.telegramStorageChatForPublicId,
+      publicAppUrl: dto.publicAppUrl,
+      telegramAlertChatId: dto.telegramAlertChatId,
     });
     return {
       id: acc.id,

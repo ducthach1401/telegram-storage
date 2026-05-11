@@ -41,13 +41,16 @@
           <button class="nav-item" data-view="trash">
             <span>♻</span><span data-i18n="trash">Thùng rác</span>
           </button>
-          <button class="nav-item" data-view="queue">
+          <button class="nav-item" data-view="queue" hidden>
             <span>↻</span><span data-i18n="queue">Queue lỗi</span>
           </button>
           <button class="nav-item" data-view="settings">
             <span>⚙</span><span data-i18n="settings">Cài đặt</span>
           </button>
-          <button class="nav-item" data-view="admin">
+          <button class="nav-item" data-view="accounts" hidden>
+            <span>👤</span><span data-i18n="accountsNav">Tài khoản</span>
+          </button>
+          <button class="nav-item" data-view="admin" hidden>
             <span>🔧</span><span data-i18n="admin">Admin/API</span>
           </button>
         </nav>
@@ -202,6 +205,73 @@
           <section class="admin-output" id="adminOutput">
             <div class="empty" data-i18n="adminOutputHint">Chọn một tính năng admin để xem kết quả.</div>
           </section>
+          <div class="settings-admin-wrap" id="settingsSystemSection">
+            <div class="settings-admin-tabs" id="settingsSystemTabs" role="tablist">
+              <button
+                type="button"
+                class="settings-admin-tab active"
+                id="settingsSystemTabConfig"
+                data-admin-settings-tab="config"
+                role="tab"
+                aria-controls="settingsSystemConfigPanel"
+                aria-selected="true"
+                data-i18n="systemSettingsTitle"
+              >
+                Cấu hình server
+              </button>
+              <button
+                type="button"
+                class="settings-admin-tab"
+                id="settingsSystemTabQueue"
+                data-admin-settings-tab="queue"
+                role="tab"
+                aria-controls="settingsSystemQueuePanel"
+                aria-selected="false"
+                tabindex="-1"
+                data-i18n="queueWorkerTitle"
+              >
+                Upload queue (chỉ env)
+              </button>
+            </div>
+            <section
+              id="settingsSystemConfigPanel"
+              class="settings-admin-tab-panel"
+              role="tabpanel"
+              aria-labelledby="settingsSystemTabConfig"
+            >
+              <div class="settings-admin-head">
+                <p class="settings-muted" data-i18n="systemSettingsHint">
+                  Giới hạn, backup, rate-limit… (không gồm credential/kết nối DB/Redis/MinIO).
+                </p>
+                <button type="button" class="ghost compact" id="settingsSystemRefreshButton" data-i18n="refresh">
+                  Làm mới
+                </button>
+              </div>
+              <div id="settingsSystemConfigMount"></div>
+            </section>
+            <section
+              id="settingsSystemQueuePanel"
+              class="settings-admin-tab-panel hidden"
+              role="tabpanel"
+              aria-labelledby="settingsSystemTabQueue"
+              hidden
+            >
+              <div id="settingsSystemQueueMount"></div>
+            </section>
+          </div>
+        </section>
+
+        <section class="panel hidden" id="accountsView">
+          <div class="panel-head">
+            <div>
+              <h2 data-i18n="accountsTitle">Quản lý tài khoản</h2>
+              <p data-i18n="accountsHint">Chỉnh role, quota MinIO và bật/tắt đăng nhập cho từng tài khoản.</p>
+            </div>
+            <button type="button" class="ghost compact" id="accountsRefreshButton" data-i18n="refresh">
+              Làm mới
+            </button>
+          </div>
+          <div id="accountsTableWrap" class="settings-accounts-table-wrap"></div>
         </section>
 
         <section class="panel hidden" id="settingsView">
@@ -210,27 +280,6 @@
               <h2 data-i18n="settings">Cài đặt</h2>
               <p id="settingsHeadHint"></p>
             </div>
-          </div>
-          <div class="settings-admin-wrap hidden" id="settingsAdminSection">
-            <div class="settings-admin-head">
-              <h3 data-i18n="adminAccountQuotaTitle">Quota MinIO theo tài khoản</h3>
-              <button type="button" class="ghost compact" id="settingsAccountsRefreshButton" data-i18n="refresh">
-                Làm mới
-              </button>
-            </div>
-            <div id="settingsAccountsTable" class="settings-accounts-table-wrap"></div>
-          </div>
-          <div class="settings-admin-wrap hidden" id="settingsSystemSection">
-            <div class="settings-admin-head">
-              <h3 data-i18n="systemSettingsTitle">Cấu hình server</h3>
-              <button type="button" class="ghost compact" id="settingsSystemRefreshButton" data-i18n="refresh">
-                Làm mới
-              </button>
-            </div>
-            <p class="settings-muted" data-i18n="systemSettingsHint">
-              Giới hạn, backup, rate-limit… (không gồm credential/kết nối DB/Redis/MinIO).
-            </p>
-            <div id="settingsSystemFormMount"></div>
           </div>
           <div id="settingsSelfCard"></div>
         </section>
@@ -298,6 +347,18 @@
           <button type="submit" class="primary-action compact" id="folderPickerSelectButton" data-i18n="chooseThisFolder">Chọn thư mục này</button>
         </div>
       </form>
+    </div>
+    <div class="modal-backdrop hidden reload-transfer-backdrop" id="reloadTransferBackdrop" aria-hidden="true">
+      <div class="modal reload-transfer-modal" role="dialog" aria-modal="true" aria-labelledby="reloadTransferTitle">
+        <div class="modal-head">
+          <h3 id="reloadTransferTitle">Tải lại trang?</h3>
+        </div>
+        <p id="reloadTransferDescription">Tải lại trang có thể gián đoạn upload và download đang chạy.</p>
+        <div class="modal-actions">
+          <button type="button" class="ghost" id="reloadTransferCancelButton" data-i18n="cancel">Hủy</button>
+          <button type="button" class="primary-action compact" id="reloadTransferConfirmButton" data-i18n="confirm">Xác nhận</button>
+        </div>
+      </div>
     </div>
     <div class="viewer-backdrop hidden" id="viewerBackdrop">
       <section class="viewer">

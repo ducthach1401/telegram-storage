@@ -26,7 +26,7 @@ import { TelegramAlertExceptionFilter } from "./telegram-alert-exception.filter"
 
 @Module({
   imports: [
-    ConfigModule.forRoot({ isGlobal: true }),
+    ConfigModule.forRoot({ isGlobal: true, expandVariables: true }),
     OgmaModule.forRoot({
       application: "telegram-storage",
       color: process.env.NODE_ENV !== "production",

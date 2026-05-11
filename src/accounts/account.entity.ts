@@ -26,6 +26,10 @@ export class Account {
   @Column({ type: 'double', default: 0 })
   minioLimitGb: number;
 
+  /** false — không đăng nhập / gọi API (admin bật lại trong quản lý tài khoản). */
+  @Column({ type: 'boolean', default: true })
+  isActive: boolean;
+
   @Column({ type: 'text', nullable: true })
   telegramBotToken: string | null;
 

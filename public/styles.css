@@ -209,7 +209,7 @@ button:disabled {
   text-align: left;
 }
 
-/* Thuộc tính HTML hidden mặc định bị display:flex của .nav-item đè — chỉ admin thấy Queue / Admin */
+/* Thuộc tính HTML hidden mặc định bị display:flex của .nav-item đè — chỉ admin thấy Queue / Tài khoản / Admin */
 .nav-item[hidden] {
   display: none !important;
 }
@@ -819,6 +819,12 @@ button:disabled {
   display: none;
 }
 
+.context-divider {
+  height: 1px;
+  margin: 4px 8px;
+  background: var(--line);
+}
+
 .context-item {
   display: flex;
   align-items: center;
@@ -829,6 +835,7 @@ button:disabled {
   padding: 10px 12px;
   background: transparent;
   color: var(--text);
+  font-size: 13px;
   text-align: left;
 }
 
@@ -845,6 +852,26 @@ button:disabled {
 
 .context-item.danger {
   color: var(--danger);
+}
+
+.context-item.danger:hover {
+  background: #feeceb;
+  color: var(--danger);
+}
+
+.context-item.success {
+  color: var(--green);
+}
+
+.context-item.success:hover {
+  background: #e8f5e9;
+  color: var(--green);
+}
+
+.modal-readonly-body {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 .filter-grid {
@@ -1059,6 +1086,8 @@ button:disabled {
 }
 
 .transfer-name {
+  flex: 1;
+  min-width: 0;
   overflow: hidden;
   font-weight: 700;
   text-overflow: ellipsis;
@@ -1066,7 +1095,9 @@ button:disabled {
 }
 
 .transfer-meta {
+  flex: 0 0 auto;
   color: var(--muted);
+  font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
 
@@ -1091,6 +1122,20 @@ button:disabled {
   background: #fbd2cf;
 }
 
+.transfer-retry {
+  flex: 0 0 auto;
+  border: 0;
+  border-radius: 999px;
+  padding: 5px 9px;
+  background: var(--primary-soft);
+  color: var(--primary-dark);
+  font-size: 12px;
+}
+
+.transfer-retry:hover {
+  background: #d2e3fc;
+}
+
 .transfer-progress {
   height: 7px;
   overflow: hidden;
@@ -1105,6 +1150,27 @@ button:disabled {
   border-radius: inherit;
   background: linear-gradient(90deg, var(--primary), #34a853);
   transition: width 0.16s ease;
+}
+
+.transfer-progress.indeterminate {
+  position: relative;
+  overflow: hidden;
+}
+
+.transfer-progress.indeterminate span {
+  width: 42%;
+  transition: none;
+  animation: transfer-progress-indeterminate 1.15s ease-in-out infinite;
+}
+
+@keyframes transfer-progress-indeterminate {
+  0% {
+    transform: translateX(-120%);
+  }
+
+  100% {
+    transform: translateX(260%);
+  }
 }
 
 .transfer-item.error .transfer-progress span {
@@ -1160,6 +1226,10 @@ button:disabled {
 
 .modal-backdrop.hidden {
   display: none;
+}
+
+.reload-transfer-backdrop {
+  z-index: 45;
 }
 
 .modal {
@@ -2019,6 +2089,21 @@ button:disabled {
   line-height: 1.4;
 }
 
+/* display:flex/grid trên .modal-field-row đè [hidden] — ẩn hẳn khi khởi tạo admin */
+.auth-card label[hidden],
+.auth-card p[hidden],
+.auth-card div[hidden] {
+  display: none !important;
+}
+
+html.register-bootstrap-admin #regUserPlatformSection {
+  display: none !important;
+}
+
+html.register-bootstrap-admin #regAdminBootstrapBlock {
+  display: block !important;
+}
+
 .auth-foot {
   text-align: center;
   font-size: 14px;
@@ -2092,12 +2177,50 @@ button:disabled {
   display: none !important;
 }
 
+#adminView #settingsSystemSection {
+  margin-top: 20px;
+}
+
+.settings-admin-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 12px 0 16px;
+}
+
+.settings-admin-tab {
+  display: inline-flex;
+  align-items: center;
+  padding: 10px 14px;
+  border: 0;
+  border-radius: 15px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.settings-admin-tab.active,
+.settings-admin-tab:hover {
+  background: var(--primary-soft);
+  color: var(--primary-dark);
+}
+
+.settings-admin-tab-panel.hidden {
+  display: none !important;
+}
+
 .settings-admin-head {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
-  margin: 8px 0 14px;
+  margin: 0 0 14px;
+}
+
+.settings-admin-head .settings-muted {
+  flex: 1;
+  margin: 0;
 }
 
 .settings-admin-head h3 {
@@ -2140,6 +2263,16 @@ button:disabled {
   border: 1px solid var(--line);
   border-radius: 10px;
   font-size: 13px;
+}
+
+.settings-role-select,
+.settings-status-select {
+  min-width: 7.5rem;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  font-size: 13px;
+  background: #fff;
 }
 
 .settings-runtime-card {

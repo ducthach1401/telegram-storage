@@ -107,6 +107,12 @@ export interface StorageQuotaStats {
   byMimeType: Array<{ mimeType: string; files: number; bytes: number }>;
 }
 
+export interface AdminAccountStorageUsage {
+  telegramBytes: number;
+  minioBytes: number;
+  minioLimitBytes: number;
+}
+
 interface PersistUploadOptions {
   allowDuplicateContent?: boolean;
 }
@@ -855,6 +861,63 @@ export class StorageService implements OnModuleInit {
         bytes: Number(row.bytes),
       })),
     };
+  }
+
+  async getAdminAccountsStorageUsage(
+    accounts: Array<{ id: string; minioLimitGb: number }>,
+  ): Promise<Record<string, AdminAccountStorageUsage>> {
+    const ids = accounts.map((account) => account.id).filter(Boolean);
+    if (!ids.length) {
+      return {};
+    }
+
+    const telegramByAccount = new Map<string, number>();
+    const telegramRows = await this.fileRepo
+      .createQueryBuilder('f')
+      .innerJoin('f.folder', 'fol')
+      .select('fol.accountId', 'accountId')
+      .addSelect('COALESCE(SUM(f.size), 0)', 'bytes')
+      .where('f.deletedAt IS NULL')
+      .andWhere('f.telegramFileId IS NOT NULL')
+      .andWhere('fol.accountId IN (:...ids)', { ids })
+      .groupBy('fol.accountId')
+      .getRawMany<{ accountId: string; bytes: string }>();
+    for (const row of telegramRows) {
+      telegramByAccount.set(row.accountId, Number(row.bytes ?? 0));
+    }
+
+    const minioByAccount = new Map<string, number>();
+    const minioRows = await this.fileRepo
+      .createQueryBuilder('f')
+      .innerJoin('f.folder', 'fol')
+      .select('fol.accountId', 'accountId')
+      .addSelect('f.s3ObjectKey', 'objectKey')
+      .addSelect('MAX(f.size)', 'bytes')
+      .where('f.s3ObjectKey IS NOT NULL')
+      .andWhere('fol.accountId IN (:...ids)', { ids })
+      .groupBy('fol.accountId')
+      .addGroupBy('f.s3ObjectKey')
+      .getRawMany<{ accountId: string; objectKey: string; bytes: string }>();
+    for (const row of minioRows) {
+      minioByAccount.set(
+        row.accountId,
+        (minioByAccount.get(row.accountId) ?? 0) + Number(row.bytes ?? 0),
+      );
+    }
+
+    const usage: Record<string, AdminAccountStorageUsage> = {};
+    for (const account of accounts) {
+      const gb = Number(account.minioLimitGb);
+      const minioLimitBytes = Math.floor(
+        Math.max(0, Number.isFinite(gb) ? gb : 0) * 1024 * 1024 * 1024,
+      );
+      usage[account.id] = {
+        telegramBytes: telegramByAccount.get(account.id) ?? 0,
+        minioBytes: minioByAccount.get(account.id) ?? 0,
+        minioLimitBytes,
+      };
+    }
+    return usage;
   }
 
   async setFileTags(t: StorageTenant, id: string, rawTags: string[]): Promise<StoredFile> {

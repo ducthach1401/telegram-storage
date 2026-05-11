@@ -71,6 +71,9 @@ export class BasicAuthGuard implements CanActivate {
     if (!account || !verifyPassword(pass, account.passwordHash)) {
       this.unauthorized(req, res);
     }
+    if (!account.isActive) {
+      throw new UnauthorizedException('Tài khoản đã bị vô hiệu hóa');
+    }
 
     req.account = account;
     return true;

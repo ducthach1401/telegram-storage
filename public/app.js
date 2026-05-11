@@ -14,6 +14,7 @@ function readAuthCookie() {
 }
 const VIEW_STORAGE_KEY = "tg-drive-file-view";
 const NAV_STORAGE_KEY = "tg-drive-nav-state";
+const ACTIVE_TRANSFER_STORAGE_KEY = "tg-drive-active-transfers";
 
 /** Khớp PATCH /admin/settings (không gồm queue worker). */
 const RUNTIME_ADMIN_FORM_ROWS = [
@@ -84,8 +85,14 @@ const i18n = {
     queue: "Queue lỗi",
     settings: "Cài đặt",
     admin: "Admin/API",
-    settingsHint:
-      "Quota MinIO, cấu hình server, chỉnh bot Telegram / chat lưu file và giới hạn upload theo tài khoản.",
+    settingsHint: "Thông tin tài khoản và kết nối Telegram của bạn.",
+    accountsNav: "Tài khoản",
+    accountsTitle: "Quản lý tài khoản",
+    accountsHint: "Điều chỉnh role, quota MinIO và trạng thái đăng nhập.",
+    accountStatus: "Trạng thái",
+    accountActive: "Hoạt động",
+    accountInactive: "Vô hiệu",
+    accountSaved: "Đã lưu tài khoản",
     settingsHintNonAdmin: "Thông tin tài khoản và kết nối Telegram.",
     telegramSaveConnection: "Lưu kết nối Telegram",
     minioQuotaLabel: "MinIO",
@@ -93,16 +100,18 @@ const i18n = {
     accountLabel: "Tài khoản",
     roleLabel: "Vai trò",
     accountMinioQuota: "Quota MinIO (account)",
+    accountTelegramUsage: "Telegram đã dùng",
+    accountMinioUsage: "MinIO đã dùng",
     minioDisabledHint: "Chưa bật quota MinIO — chỉ lưu qua Telegram (tối đa ~20MB/file).",
     quotaSaved: "Đã lưu quota",
     loadingProfile: "Đang tải…",
     saveQuota: "Lưu",
     telegramConnectionTitle: "Kết nối Telegram",
-    usePlatformTelegramLabel: "Dùng bot và kênh của admin đầu tiên",
+    usePlatformTelegramLabel: "Dùng bot và kênh lưu chung với hệ thống",
     usePlatformTelegramHint:
-      "Bật thì dùng bot token của admin đầu tiên; chat lưu lấy từ TELEGRAM_STORAGE_CHAT_FOR_PUBLIC_ID (Cài đặt server) nếu có, không thì chat đã lưu trên tài khoản đó. Tắt để nhập bot và kênh riêng.",
+      "Bật: bot/kênh do hệ thống cấu hình; chat lưu ưu tiên TELEGRAM_STORAGE_CHAT_FOR_PUBLIC_ID (Cài đặt server), không có thì chat đã lưu trên tài khoản admin. Tắt: bot và kênh riêng.",
     primaryAdminTelegramHint:
-      "Bạn là admin đầu tiên: bot token trên đây + chat lưu (ô dưới hoặc TELEGRAM_STORAGE_CHAT_FOR_PUBLIC_ID trong Cài đặt server) phục vụ webhook và user “dùng chung”. Không thể chuyển sang chế độ dùng chung.",
+      "Admin: bot token + chat lưu (ô dưới hoặc TELEGRAM_STORAGE_CHAT_FOR_PUBLIC_ID) phục vụ webhook và user “dùng chung”. Không chuyển sang chế độ chung.",
     telegramBotTokenLabel: "Bot token",
     telegramBotTokenKeepHint:
       "Để trống nếu chỉ đổi chat ID hoặc giữ nguyên token hiện tại.",
@@ -110,7 +119,7 @@ const i18n = {
     telegramSaved: "Đã lưu cấu hình Telegram",
     systemSettingsTitle: "Cấu hình server",
     systemSettingsHint:
-      "`TELEGRAM_STORAGE_CHAT_FOR_PUBLIC_ID` (chat lưu chung — chỉ UI/DB, không env), chat cảnh báo (`TELEGRAM_ALERT_CHAT_ID`), URL công khai, ZIP, backup MySQL… Bot token vẫn trên tài khoản admin đầu tiên (Cài đặt → Kết nối Telegram). Áp dụng ngay (worker queue chỉ đọc từ env khi khởi động).",
+      "`TELEGRAM_STORAGE_CHAT_FOR_PUBLIC_ID` (chat lưu chung — chỉ UI/DB, không env), chat cảnh báo (`TELEGRAM_ALERT_CHAT_ID`), URL công khai, ZIP, backup MySQL… Bot token trên tài khoản admin (Cài đặt → Kết nối Telegram). Áp dụng ngay (worker queue chỉ đọc từ env khi khởi động).",
     runtimeSave: "Lưu cấu hình",
     runtimeSaved: "Đã lưu cấu hình server",
     queueWorkerTitle: "Upload queue (chỉ env)",
@@ -168,17 +177,17 @@ const i18n = {
     zipAsync: "ZIP queue",
     copyFolder: "Copy folder",
     deleteFolder: "Xóa folder",
-    rename: "Đổi tên file",
-    move: "Di chuyển file",
-    info: "Thông tin file",
+    rename: "Đổi tên",
+    move: "Di chuyển",
+    info: "Thông tin",
     thumb: "Thumb",
     rightClickHint: "Click phải để mở menu",
     open: "Mở",
-    openFile: "Mở file",
-    download: "Tải file",
-    share: "Chia sẻ file",
-    tags: "Gắn tag file",
-    delete: "Xóa file",
+    openFile: "Mở",
+    download: "Tải xuống",
+    share: "Chia sẻ",
+    tags: "Gắn tag",
+    delete: "Xóa",
     restore: "Khôi phục",
     permanentDelete: "Xóa hẳn",
     retry: "Retry",
@@ -204,6 +213,10 @@ const i18n = {
     folderUploadDone: "Upload folder hoàn tất",
     uploadCompleted: "Upload hoàn tất",
     uploadFailed: "Upload lỗi",
+    downloadInterrupted: "Gián đoạn khi tải lại trang",
+    retryDownload: "Tải lại",
+    reloadTransferTitle: "Tải lại trang?",
+    reloadTransferWarning: "Tải lại trang có thể gián đoạn upload và download đang chạy.",
     duplicateImageTitle: "Ảnh đã tồn tại",
     duplicateImageHint: "Ảnh này đã có trong cùng thư mục. Bạn muốn vẫn add thêm một bản mới hay bỏ qua và tắt tiến trình này?",
     addDuplicateAnyway: "Vẫn add",
@@ -270,8 +283,14 @@ const i18n = {
     queue: "Failed queue",
     settings: "Settings",
     admin: "Admin/API",
-    settingsHint:
-      "MinIO quota, server configuration, Telegram bot/storage chat, and per-account upload limits.",
+    settingsHint: "Your account info and Telegram connection.",
+    accountsNav: "Accounts",
+    accountsTitle: "Account management",
+    accountsHint: "Edit role, MinIO quota, and login status.",
+    accountStatus: "Status",
+    accountActive: "Active",
+    accountInactive: "Inactive",
+    accountSaved: "Account saved",
     settingsHintNonAdmin: "Account info and Telegram connection.",
     telegramSaveConnection: "Save Telegram connection",
     minioQuotaLabel: "MinIO",
@@ -279,23 +298,25 @@ const i18n = {
     accountLabel: "Account",
     roleLabel: "Role",
     accountMinioQuota: "Account MinIO quota",
+    accountTelegramUsage: "Telegram used",
+    accountMinioUsage: "MinIO used",
     minioDisabledHint: "MinIO quota off — Telegram-only storage (~20MB/file max).",
     quotaSaved: "Quota saved",
     loadingProfile: "Loading…",
     saveQuota: "Save",
     telegramConnectionTitle: "Telegram connection",
-    usePlatformTelegramLabel: "Use the first admin account's bot and storage channel",
+    usePlatformTelegramLabel: "Use the system's shared bot and storage channel",
     usePlatformTelegramHint:
-      "When enabled, uploads use the first admin's bot token; the storage chat is `TELEGRAM_STORAGE_CHAT_FOR_PUBLIC_ID` (server settings) if set, otherwise the chat saved on that admin account. Turn off to use your own bot and channel.",
+      "On: bot/channel configured for the system; storage chat prefers `TELEGRAM_STORAGE_CHAT_FOR_PUBLIC_ID` (server settings), else the chat saved on the admin account. Off: your own bot and channel.",
     primaryAdminTelegramHint:
-      "You are the first admin: your bot token below plus storage chat (this field or `TELEGRAM_STORAGE_CHAT_FOR_PUBLIC_ID` in server settings) powers the webhook and shared defaults. You cannot switch to shared mode.",
+      "Admin: bot token + storage chat (below or `TELEGRAM_STORAGE_CHAT_FOR_PUBLIC_ID`) for the webhook and shared defaults. Cannot switch to shared mode.",
     telegramBotTokenLabel: "Bot token",
     telegramBotTokenKeepHint: "Leave empty to keep your current token when changing only the chat ID.",
     telegramChatIdLabel: "Storage chat / channel ID",
     telegramSaved: "Telegram settings saved",
     systemSettingsTitle: "Server settings",
     systemSettingsHint:
-      "`TELEGRAM_STORAGE_CHAT_FOR_PUBLIC_ID` (shared storage — UI/DB only, not env), alert chat (`TELEGRAM_ALERT_CHAT_ID`), public URL, ZIP, MySQL backup… Bot token stays on the first admin account (Settings → Telegram connection). Applied immediately (upload queue still reads env at worker startup).",
+      "`TELEGRAM_STORAGE_CHAT_FOR_PUBLIC_ID` (shared storage — UI/DB only, not env), alert chat (`TELEGRAM_ALERT_CHAT_ID`), public URL, ZIP, MySQL backup… Bot token on the admin account (Settings → Telegram connection). Applied immediately (upload queue still reads env at worker startup).",
     runtimeSave: "Save settings",
     runtimeSaved: "Server settings saved",
     queueWorkerTitle: "Upload queue (env only)",
@@ -353,17 +374,17 @@ const i18n = {
     zipAsync: "Queue ZIP",
     copyFolder: "Copy folder",
     deleteFolder: "Delete folder",
-    rename: "Rename file",
-    move: "Move file",
-    info: "File info",
+    rename: "Rename",
+    move: "Move",
+    info: "Details",
     thumb: "Thumb",
     rightClickHint: "Right click for menu",
     open: "Open",
-    openFile: "Open file",
-    download: "Download file",
-    share: "Share file",
-    tags: "Edit file tags",
-    delete: "Delete file",
+    openFile: "Open",
+    download: "Download",
+    share: "Share",
+    tags: "Tags",
+    delete: "Delete",
     restore: "Restore",
     permanentDelete: "Delete forever",
     retry: "Retry",
@@ -389,6 +410,10 @@ const i18n = {
     folderUploadDone: "Folder upload completed",
     uploadCompleted: "Upload completed",
     uploadFailed: "Upload failed",
+    downloadInterrupted: "Interrupted by page reload",
+    retryDownload: "Retry download",
+    reloadTransferTitle: "Reload page?",
+    reloadTransferWarning: "Reloading may interrupt active uploads and downloads.",
     duplicateImageTitle: "Image already exists",
     duplicateImageHint: "This image already exists in the same folder. Add another copy anyway, or skip it and remove this transfer?",
     addDuplicateAnyway: "Add anyway",
@@ -450,12 +475,14 @@ const state = {
   transferAutoClearTimer: null,
   uploadProcessing: false,
   uploadRetryTimer: null,
+  uploadQueueSuppressed: false,
   maxUploadBytes: 50 * 1024 * 1024 * 1024,
   selectionMode: false,
   /** Ignore backdrop closes immediately after open (double-click ghost click). */
   previewBackdropGuardUntil: 0,
   /** Payload gần nhất từ GET /auth/verify (sau applyAppConfig). */
   accountProfile: null,
+  adminSettingsTab: "config",
 };
 
 function parseStoredJson(key) {
@@ -474,6 +501,10 @@ function accountIsAdmin() {
   return String(state.accountProfile?.role ?? "").toLowerCase() === "admin";
 }
 
+function isAdminOnlyView(view) {
+  return view === "admin" || view === "queue" || view === "accounts";
+}
+
 function formatBytes(bytes) {
   const n = Number(bytes || 0);
   if (n < 1024) return `${n} B`;
@@ -487,8 +518,158 @@ function formatBytes(bytes) {
   return `${value.toFixed(value >= 10 ? 1 : 2)} ${units[idx]}`;
 }
 
+function formatAdminMinioUsage(minioBytes, limitBytes) {
+  const used = Number(minioBytes || 0);
+  const limit = Number(limitBytes || 0);
+  if (limit <= 0) {
+    return formatBytes(used);
+  }
+  return `${formatBytes(used)} / ${formatBytes(limit)}`;
+}
+
 function formatSpeed(bytesPerSecond) {
   return `${formatBytes(bytesPerSecond)}/s`;
+}
+
+let transferRenderRaf = null;
+let persistTransfersTimer = null;
+
+function snapshotActiveTransfers() {
+  return [...state.transfers.values()]
+    .filter((item) => isActiveTransfer(item) || transferCanRetryDownload(item))
+    .map((item) => {
+      const snapshot = {
+        id: item.id,
+        kind: item.kind,
+        name: item.name,
+        status: item.status,
+        loaded: item.loaded,
+        total: item.total,
+        startedAt: item.startedAt,
+        updatedAt: item.updatedAt,
+        error: Boolean(item.error),
+      };
+      if (item.kind === "download" && item.downloadUrl) {
+        snapshot.downloadUrl = item.downloadUrl;
+        snapshot.knownTotalBytes = Number(item.knownTotalBytes ?? item.total ?? 0);
+      }
+      return snapshot;
+    });
+}
+
+function persistActiveTransferSnapshots() {
+  try {
+    sessionStorage.setItem(ACTIVE_TRANSFER_STORAGE_KEY, JSON.stringify(snapshotActiveTransfers()));
+  } catch {
+    // sessionStorage có thể đầy hoặc bị chặn.
+  }
+}
+
+function schedulePersistActiveTransfers() {
+  if (persistTransfersTimer) clearTimeout(persistTransfersTimer);
+  persistTransfersTimer = setTimeout(() => {
+    persistTransfersTimer = null;
+    persistActiveTransferSnapshots();
+  }, 200);
+}
+
+function clearActiveTransferSnapshots() {
+  try {
+    sessionStorage.removeItem(ACTIVE_TRANSFER_STORAGE_KEY);
+  } catch {
+    // Best-effort.
+  }
+}
+
+function restoreActiveTransferSnapshots() {
+  let saved = [];
+  try {
+    saved = JSON.parse(sessionStorage.getItem(ACTIVE_TRANSFER_STORAGE_KEY) || "[]");
+  } catch {
+    saved = [];
+  }
+  clearActiveTransferSnapshots();
+  for (const item of saved) {
+    if (!item?.id || state.transfers.has(item.id)) continue;
+    const interrupted = item.kind === "download";
+    state.transfers.set(item.id, {
+      id: item.id,
+      kind: item.kind,
+      name: item.name,
+      status: interrupted ? t("downloadInterrupted") : item.status,
+      loaded: Number(item.loaded || 0),
+      total: Number(item.total || 0),
+      speed: 0,
+      startedAt: item.startedAt || performance.now(),
+      updatedAt: item.updatedAt || performance.now(),
+      cancelable: false,
+      error: interrupted || Boolean(item.error),
+      downloadUrl: item.downloadUrl || null,
+      knownTotalBytes: Number(item.knownTotalBytes ?? item.total ?? 0),
+    });
+  }
+  if (saved.length) {
+    renderTransfers();
+  }
+}
+
+function scheduleTransferRender() {
+  if (transferRenderRaf !== null) return;
+  transferRenderRaf = requestAnimationFrame(() => {
+    transferRenderRaf = null;
+    renderTransfers();
+  });
+}
+
+function nextTransferSpeed(transferId, sample) {
+  const item = state.transfers.get(transferId);
+  if (!item) return sample;
+  const prev = Number(item.speed || 0);
+  if (!Number.isFinite(sample) || sample <= 0) return prev;
+  if (!Number.isFinite(prev) || prev <= 0) return sample;
+  return prev * 0.65 + sample * 0.35;
+}
+
+function measureTransferSpeed(transferId, loaded, lastLoaded, lastTime) {
+  const item = state.transfers.get(transferId);
+  if (!item || loaded <= 0) return Number(item?.speed || 0);
+  const now = performance.now();
+  const elapsed = Math.max(1, now - lastTime) / 1000;
+  const instantSpeed = lastTime ? (loaded - lastLoaded) / elapsed : 0;
+  const averageSpeed = loaded / Math.max(0.001, (now - item.startedAt) / 1000);
+  const sample = instantSpeed > 0 ? instantSpeed : averageSpeed;
+  return nextTransferSpeed(transferId, sample);
+}
+
+function transferDisplaySpeed(item) {
+  const speed = Number(item.speed || 0);
+  if (Number.isFinite(speed) && speed > 0) {
+    return formatSpeed(speed);
+  }
+  const measuring = item.status === t("uploading") || item.status === t("downloading");
+  if (!measuring || item.loaded <= 0 || !item.startedAt) {
+    return "--/s";
+  }
+  const elapsed = Math.max(0.001, (performance.now() - item.startedAt) / 1000);
+  return formatSpeed(item.loaded / elapsed);
+}
+
+function transferIsMeasuring(item) {
+  return item.status === t("uploading") || item.status === t("downloading");
+}
+
+function transferProgressParts(item) {
+  const loaded = Math.max(0, Number(item.loaded || 0));
+  const total = Math.max(0, Number(item.total || 0));
+  const hasKnownTotal = total > 0;
+  const pct = hasKnownTotal ? Math.min(100, Math.round((loaded / total) * 100)) : 0;
+  const sizeText = hasKnownTotal
+    ? `${formatBytes(loaded)}/${formatBytes(total)}`
+    : loaded > 0
+      ? formatBytes(loaded)
+      : formatBytes(0);
+  const indeterminate = !hasKnownTotal && loaded > 0 && transferIsMeasuring(item);
+  return { pct, sizeText, indeterminate, hasKnownTotal };
 }
 
 function formatUploadedAt(value) {
@@ -515,6 +696,7 @@ function createTransfer(kind, name, id = `${Date.now()}-${Math.random().toString
     updatedAt: performance.now(),
   });
   renderTransfers();
+  schedulePersistActiveTransfers();
   return id;
 }
 
@@ -522,7 +704,9 @@ function updateTransfer(id, patch) {
   const item = state.transfers.get(id);
   if (!item) return;
   Object.assign(item, patch);
-  renderTransfers();
+  item.updatedAt = performance.now();
+  scheduleTransferRender();
+  schedulePersistActiveTransfers();
   scheduleTransferAutoClear();
 }
 
@@ -532,6 +716,146 @@ function finishTransfer(id, status = t("done")) {
 
 function isActiveTransfer(item) {
   return item.cancelable || item.error || item.status !== t("done");
+}
+
+function transferCanRetryDownload(item) {
+  return item.kind === "download" && Boolean(item.downloadUrl) && Boolean(item.error);
+}
+
+function hasOngoingPageTransfers() {
+  if (state.uploadProcessing) return true;
+  return [...state.transfers.values()].some((item) => {
+    if (transferCanRetryDownload(item)) return false;
+    if (item.status === t("done") || item.status === t("canceled")) return false;
+    if (item.error && !item.cancelable) return false;
+    return true;
+  });
+}
+
+let reloadGuardBypass = false;
+let reloadConfirmationPending = false;
+let reloadTransferModalPromise = null;
+
+function isReloadShortcut(event) {
+  if (event.repeat) return false;
+  if (event.code === "F5" || event.key === "F5") return true;
+  if ((event.ctrlKey || event.metaKey) && (event.code === "KeyR" || event.key.toLowerCase() === "r")) return true;
+  return false;
+}
+
+function isReloadNavigation(event) {
+  if (event.navigationType === "reload") return true;
+  const destination = event.destination;
+  if (!destination?.sameDocument) return false;
+  try {
+    return destination.url === window.location.href;
+  } catch {
+    return false;
+  }
+}
+
+function openReloadTransferModal() {
+  if (reloadTransferModalPromise) return reloadTransferModalPromise;
+  const backdrop = $("#reloadTransferBackdrop");
+  if (!backdrop) {
+    return openConfirmModal({
+      title: t("reloadTransferTitle"),
+      description: t("reloadTransferWarning"),
+    });
+  }
+  reloadTransferModalPromise = new Promise((resolve) => {
+    let settled = false;
+    const finish = (confirmed) => {
+      if (settled) return;
+      settled = true;
+      document.removeEventListener("keydown", onKeydown, true);
+      backdrop.classList.add("hidden");
+      backdrop.setAttribute("aria-hidden", "true");
+      $("#reloadTransferCancelButton").onclick = null;
+      $("#reloadTransferConfirmButton").onclick = null;
+      backdrop.onclick = null;
+      reloadTransferModalPromise = null;
+      resolve(confirmed);
+    };
+    const onKeydown = (event) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      finish(false);
+    };
+    $("#reloadTransferTitle").textContent = t("reloadTransferTitle");
+    $("#reloadTransferDescription").textContent = t("reloadTransferWarning");
+    backdrop.classList.remove("hidden");
+    backdrop.setAttribute("aria-hidden", "false");
+    $("#reloadTransferCancelButton").onclick = () => finish(false);
+    $("#reloadTransferConfirmButton").onclick = () => finish(true);
+    backdrop.onclick = (event) => {
+      if (event.target === backdrop) finish(false);
+    };
+    document.addEventListener("keydown", onKeydown, true);
+    setTimeout(() => $("#reloadTransferConfirmButton")?.focus(), 0);
+  });
+  return reloadTransferModalPromise;
+}
+
+async function confirmReloadPage() {
+  if (reloadGuardBypass || reloadConfirmationPending) return;
+  reloadConfirmationPending = true;
+  try {
+    if (hasOngoingPageTransfers()) {
+      const confirmed = await openReloadTransferModal();
+      if (!confirmed) return;
+    }
+    reloadGuardBypass = true;
+    persistActiveTransferSnapshots();
+    if (window.navigation?.reload) {
+      await window.navigation.reload();
+      return;
+    }
+    window.location.reload();
+  } finally {
+    reloadConfirmationPending = false;
+  }
+}
+
+function handleReloadNavigation(event) {
+  if (reloadGuardBypass || !isReloadNavigation(event) || !hasOngoingPageTransfers()) return;
+  const runPrompt = () => confirmReloadPage();
+  if (typeof event.intercept === "function" && event.canIntercept) {
+    event.intercept({
+      handler() {
+        return runPrompt();
+      },
+    });
+    return;
+  }
+  if (!event.cancelable) return;
+  event.preventDefault();
+  void runPrompt();
+}
+
+function wireReloadTransferGuard() {
+  if (window.navigation?.addEventListener) {
+    window.navigation.addEventListener("navigate", handleReloadNavigation, { capture: true });
+  }
+  window.addEventListener(
+    "keydown",
+    (event) => {
+      if (!isReloadShortcut(event) || !hasOngoingPageTransfers()) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      void confirmReloadPage();
+    },
+    { capture: true },
+  );
+}
+
+async function retryDownloadTransfer(item) {
+  if (!transferCanRetryDownload(item)) return;
+  const { downloadUrl, name, knownTotalBytes, total } = item;
+  state.transfers.delete(item.id);
+  renderTransfers();
+  schedulePersistActiveTransfers();
+  await downloadWithAuth(downloadUrl, name, { knownTotalBytes: knownTotalBytes ?? total });
 }
 
 function scheduleTransferAutoClear() {
@@ -546,6 +870,7 @@ function scheduleTransferAutoClear() {
     if ([...state.transfers.values()].some(isActiveTransfer)) return;
     state.transfers.clear();
     renderTransfers();
+    clearActiveTransferSnapshots();
   }, 1200);
 }
 
@@ -563,23 +888,30 @@ function renderTransfers() {
   collapseButton.textContent = state.transferCollapsed && compact ? `↑${activeCount || items.length}` : state.transferCollapsed ? "+" : "−";
   list.innerHTML = "";
   items.forEach((item) => {
-    const pct = item.total > 0 ? Math.min(100, Math.round((item.loaded / item.total) * 100)) : 0;
-    const sizeText = item.total > 0 ? `${formatBytes(item.loaded)}/${formatBytes(item.total)}` : formatBytes(item.loaded);
-    const speedText = item.speed ? formatSpeed(item.speed) : "--/s";
+    const { pct, sizeText, indeterminate, hasKnownTotal } = transferProgressParts(item);
+    const speedText = transferDisplaySpeed(item);
     const row = document.createElement("div");
     row.className = `transfer-item ${item.error ? "error" : ""}`;
     row.innerHTML = `
       <div class="transfer-title">
         <span class="transfer-name">${escapeHtml(item.name)}</span>
-        <span class="transfer-meta">${pct || 0}% · ${speedText}</span>
+        <span class="transfer-meta">${hasKnownTotal ? `${pct}%` : indeterminate ? "…" : "0%"} · ${speedText}</span>
       </div>
       <div class="transfer-detail">
         <span class="muted">${sizeText} · ${escapeHtml(item.status)}</span>
       </div>
-      <div class="transfer-progress"><span style="width:${pct}%"></span></div>
+      <div class="transfer-progress${indeterminate ? " indeterminate" : ""}"><span style="width:${indeterminate ? "100" : pct}%"></span></div>
     `;
+    const detail = row.querySelector(".transfer-detail");
+    if (transferCanRetryDownload(item)) {
+      const retryButton = document.createElement("button");
+      retryButton.type = "button";
+      retryButton.className = "transfer-retry";
+      retryButton.textContent = t("retryDownload");
+      retryButton.addEventListener("click", () => void retryDownloadTransfer(item).catch(showError));
+      detail.appendChild(retryButton);
+    }
     if (item.cancelable) {
-      const detail = row.querySelector(".transfer-detail");
       const cancelButton = document.createElement("button");
       cancelButton.type = "button";
       cancelButton.className = "transfer-cancel";
@@ -675,6 +1007,40 @@ async function deleteUploadRecord(id) {
   });
 }
 
+async function clearUploadDb() {
+  const store = await uploadStore("readwrite");
+  return new Promise((resolve, reject) => {
+    const req = store.clear();
+    req.onsuccess = () => resolve();
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function clearPendingUploads() {
+  state.uploadQueueSuppressed = true;
+  if (state.uploadRetryTimer) {
+    clearTimeout(state.uploadRetryTimer);
+    state.uploadRetryTimer = null;
+  }
+  for (const [id, abort] of [...state.transferAborters.entries()]) {
+    if (state.transfers.get(id)?.kind === "upload") {
+      abort?.();
+    }
+  }
+  for (const [id, item] of [...state.transfers.entries()]) {
+    if (item.kind !== "upload") continue;
+    state.transfers.delete(id);
+    state.transferAborters.delete(id);
+  }
+  try {
+    await clearUploadDb();
+  } catch {
+    // Best-effort trước khi chuyển sang login.
+  }
+  clearActiveTransferSnapshots();
+  renderTransfers();
+}
+
 async function getAllUploadRecords() {
   const store = await uploadStore("readonly");
   return new Promise((resolve, reject) => {
@@ -685,6 +1051,12 @@ async function getAllUploadRecords() {
 }
 
 async function enqueueUpload(file, folderId = state.folderId) {
+  if (state.uploadQueueSuppressed) {
+    return null;
+  }
+  if (isLikelyDirectoryPlaceholderFile(file, inferRootNameFromFile(file))) {
+    return null;
+  }
   if (!canUploadFile(file)) {
     return null;
   }
@@ -721,17 +1093,20 @@ async function restoreUploadTransfers() {
   const records = await getAllUploadRecords();
   records.forEach((record) => {
     createTransfer("upload", record.fileName, record.id);
+    const total = record.file?.size || 0;
+    const resumed = Boolean(record.jobId);
     updateTransfer(record.id, {
-      status: record.status === "uploading" ? t("queued") : t("queued"),
-      loaded: 0,
-      total: record.file?.size || 0,
+      status: resumed ? t("processing") : record.status === "uploading" ? t("uploading") : t("queued"),
+      loaded: resumed ? total : 0,
+      total,
       speed: 0,
-      cancelable: true,
+      cancelable: !resumed,
     });
   });
 }
 
 async function processUploadQueue() {
+  if (state.uploadQueueSuppressed) return;
   if (state.uploadProcessing) return;
   if (state.uploadRetryTimer) {
     clearTimeout(state.uploadRetryTimer);
@@ -740,6 +1115,7 @@ async function processUploadQueue() {
   state.uploadProcessing = true;
   try {
     while (true) {
+      if (state.uploadQueueSuppressed) return;
       const now = Date.now();
       const records = (await getAllUploadRecords()).sort((a, b) => a.createdAt - b.createdAt);
       const record = records.find((item) => !item.retryAfter || item.retryAfter <= now);
@@ -749,18 +1125,36 @@ async function processUploadQueue() {
         return;
       }
       if (!record) return;
-      record.status = "uploading";
-      await putUploadRecord(record);
-      updateTransfer(record.id, { status: t("uploading"), loaded: 0, total: record.file.size, speed: 0, cancelable: true, error: false });
       try {
-        const queued = await uploadFileRecord(record);
-        updateTransfer(record.id, { status: t("processing"), speed: 0, error: false, cancelable: false });
-        const result = await watchUploadJob(queued.jobId, record.id, record.file?.size ?? 0);
+        if (!record.jobId) {
+          record.status = "uploading";
+          await putUploadRecord(record);
+          updateTransfer(record.id, {
+            status: t("uploading"),
+            loaded: 0,
+            total: record.file?.size || 0,
+            speed: 0,
+            cancelable: true,
+            error: false,
+          });
+          const queued = await uploadFileRecord(record);
+          record.jobId = queued.jobId;
+        }
+        updateTransfer(record.id, {
+          status: t("processing"),
+          speed: 0,
+          error: false,
+          cancelable: false,
+          loaded: record.file?.size || 0,
+          total: record.file?.size || 0,
+        });
+        const result = await watchUploadJob(record.jobId, record.id, record.file?.size ?? 0);
         if (result === "addDuplicateAnyway") {
           record.allowDuplicateContent = true;
           record.status = "queued";
           record.createdAt = Date.now();
           delete record.retryAfter;
+          delete record.jobId;
           await putUploadRecord(record);
           updateTransfer(record.id, { status: t("queued"), loaded: 0, total: record.file.size, speed: 0, cancelable: true, error: false });
           continue;
@@ -774,6 +1168,7 @@ async function processUploadQueue() {
         record.status = "queued";
         record.createdAt = Date.now();
         record.retryAfter = Date.now() + UPLOAD_RETRY_DELAY_MS;
+        delete record.jobId;
         await putUploadRecord(record);
         updateTransfer(record.id, {
           status: err.message || String(err),
@@ -790,6 +1185,7 @@ async function processUploadQueue() {
 }
 
 function scheduleUploadQueue(delayMs = 0) {
+  if (state.uploadQueueSuppressed) return;
   if (state.uploadRetryTimer) {
     clearTimeout(state.uploadRetryTimer);
   }
@@ -920,6 +1316,7 @@ function openReadOnlyInfoModal(title, text) {
       desc.style.whiteSpace = "";
       desc.style.maxHeight = "";
       desc.style.overflow = "";
+      desc.classList.remove("modal-readonly-body");
       inputWrap.style.display = "grid";
       cancelBtn.style.display = "";
       submitBtn.textContent = t("confirm");
@@ -937,6 +1334,7 @@ function openReadOnlyInfoModal(title, text) {
     desc.style.whiteSpace = "pre-wrap";
     desc.style.maxHeight = "min(60vh, 520px)";
     desc.style.overflow = "auto";
+    desc.classList.add("modal-readonly-body");
     submitBtn.textContent = t("confirm");
 
     backdrop.classList.remove("hidden");
@@ -1173,6 +1571,7 @@ function applyAppConfig(data) {
   }
   if (data?.username) {
     state.accountProfile = {
+      id: data.id,
       username: data.username,
       role: data.role,
       rootFolderId: data.rootFolderId,
@@ -1187,7 +1586,7 @@ function applyAppConfig(data) {
   renderSettingsSelf();
   syncAdminOnlyNavVisibility();
   syncSidebarMinioQuotaVisibility();
-  if (!accountIsAdmin() && (state.view === "admin" || state.view === "queue")) {
+  if (!accountIsAdmin() && isAdminOnlyView(state.view)) {
     state.view = "drive";
   }
 }
@@ -1203,7 +1602,9 @@ function syncSidebarMinioQuotaVisibility() {
 /** Queue lỗi + Admin/API chỉ cho role admin (đồng bộ với backend RolesGuard). */
 function syncAdminOnlyNavVisibility() {
   const show = accountIsAdmin();
-  $$('.nav-item[data-view="queue"], .nav-item[data-view="admin"]').forEach((btn) => {
+  $$(
+    '.nav-item[data-view="queue"], .nav-item[data-view="admin"], .nav-item[data-view="accounts"]',
+  ).forEach((btn) => {
     btn.hidden = !show;
     btn.setAttribute("aria-hidden", show ? "false" : "true");
   });
@@ -1214,8 +1615,9 @@ async function loadAppConfig() {
   applyAppConfig(data);
 }
 
-function logout() {
+async function logout() {
   localStorage.removeItem(NAV_STORAGE_KEY);
+  await clearPendingUploads();
   clearAuth();
   window.location.replace("/login.html");
 }
@@ -1237,22 +1639,25 @@ function applyLanguage() {
   renderSettingsSelf();
   syncAdminOnlyNavVisibility();
   syncSidebarMinioQuotaVisibility();
-  if (state.view === "settings" && accountIsAdmin()) {
+  if (state.view === "admin" && accountIsAdmin()) {
+    setAdminSettingsTab(state.adminSettingsTab || "config");
     void loadRuntimeSettingsAdmin().catch(showError);
-    void loadAdminAccountsForSettings().catch(showError);
+  }
+  if (state.view === "accounts" && accountIsAdmin()) {
+    void loadAdminAccountsView().catch(showError);
   }
 }
 
 function setView(view, opts = {}) {
-  if (!["drive", "trash", "queue", "settings", "admin"].includes(view)) {
+  if (!["drive", "trash", "queue", "settings", "accounts", "admin"].includes(view)) {
     view = "drive";
   }
-  if (state.accountProfile && !accountIsAdmin() && (view === "admin" || view === "queue")) {
+  if (!accountIsAdmin() && isAdminOnlyView(view)) {
     view = "drive";
   }
   state.view = view;
   $$(".nav-item").forEach((btn) => btn.classList.toggle("active", btn.dataset.view === view));
-  ["drive", "trash", "queue", "settings", "admin"].forEach((name) => {
+  ["drive", "trash", "queue", "settings", "accounts", "admin"].forEach((name) => {
     $(`#${name}View`)?.classList.toggle("hidden", name !== view);
   });
   if (view !== "drive") {
@@ -1266,6 +1671,13 @@ function setView(view, opts = {}) {
     if (view === "trash") void loadTrash();
     if (view === "queue") void loadQueue();
     if (view === "settings") void loadSettingsView().catch(showError);
+    if (view === "admin" && accountIsAdmin()) {
+      setAdminSettingsTab(state.adminSettingsTab || "config");
+      void loadRuntimeSettingsAdmin().catch(showError);
+    }
+    if (view === "accounts" && accountIsAdmin()) {
+      void loadAdminAccountsView().catch(showError);
+    }
   }
 }
 
@@ -1308,7 +1720,7 @@ function restoreNavigationState() {
   const saved = parseStoredJson(NAV_STORAGE_KEY) || {};
   const fromHash = parseHashNavigation();
   const source = { ...saved, ...(fromHash || {}) };
-  if (["drive", "trash", "queue", "settings", "admin"].includes(source.view)) {
+  if (["drive", "trash", "queue", "settings", "accounts", "admin"].includes(source.view)) {
     state.view = source.view;
   }
   if (source.folderId) {
@@ -1332,7 +1744,7 @@ function persistNavigationState() {
   normalizePath();
   const search = currentSearchSnapshot();
   const nav = {
-    view: state.view,
+    view: !accountIsAdmin() && isAdminOnlyView(state.view) ? "drive" : state.view,
     folderId: state.folderId,
     path: state.path,
     searchActive: state.searchActive,
@@ -1502,36 +1914,40 @@ function renderFolders(folders) {
   syncSelectionBar();
 }
 
-function folderCardMenuItems(folder) {
+function itemContextMenuItems(type, item) {
+  if (type === "folder") {
+    return [
+      { label: t("open"), handler: () => navigateToFolder(item.id, item.name) },
+      { separator: true },
+      { label: t("downloadZip"), handler: () => downloadFolderZip(item.id) },
+      { label: t("copyFolder"), handler: () => copyFolder(item.id) },
+      { label: t("move"), handler: () => moveFolder(item) },
+      { label: t("info"), handler: () => showItemInfo("folder", item) },
+      { separator: true },
+      {
+        label: t("delete"),
+        variant: "danger",
+        handler: () => deleteFolder(item.id, item.name),
+      },
+    ];
+  }
   return [
-    { label: t("open"), handler: () => navigateToFolder(folder.id, folder.name) },
-    { label: t("downloadZip"), handler: () => downloadFolderZip(folder.id) },
-    { label: t("copyFolder"), handler: () => copyFolder(folder.id) },
-    {
-      label: t("deleteFolder"),
-      variant: "danger",
-      handler: () => deleteFolder(folder.id, folder.name),
-    },
-  ];
-}
-
-function fileMenuItems(file) {
-  return [
-    { label: t("openFile"), handler: () => openFilePreview(file) },
-    { label: t("download"), handler: () => downloadFile(file) },
-    { label: t("share"), handler: () => createShare(file.id) },
-    { label: t("tags"), handler: () => editTags(file) },
-    { label: t("rename"), handler: () => renameFile(file) },
-    { label: t("move"), handler: () => moveFile(file) },
-    { label: t("info"), handler: () => showFileInfo(file.id) },
-    ...(file.thumbnailTelegramFileId
-      ? [{ label: t("thumb"), handler: () => openThumbnailPreview(file) }]
+    { label: t("open"), handler: () => openFilePreview(item) },
+    { label: t("download"), handler: () => downloadFile(item) },
+    { label: t("share"), handler: () => createShare(item.id) },
+    { label: t("tags"), handler: () => editTags(item) },
+    { label: t("rename"), handler: () => renameFile(item) },
+    { label: t("move"), handler: () => moveFile(item) },
+    { label: t("info"), handler: () => showItemInfo("file", item) },
+    ...(item.thumbnailTelegramFileId
+      ? [{ label: t("thumb"), handler: () => openThumbnailPreview(item) }]
       : []),
+    { separator: true },
     {
       label: t("delete"),
       variant: "danger",
       handler: async () => {
-        await api(`/files/${file.id}`, { method: "DELETE" });
+        await api(`/files/${item.id}`, { method: "DELETE" });
         toast(t("deleted"));
         await Promise.all([loadDrive(), loadQuota()]);
       },
@@ -1796,7 +2212,7 @@ function contextMenuItemsForItem(type, item) {
   if (count > 1 && selected) {
     return selectionMenuItems();
   }
-  return type === "folder" ? folderCardMenuItems(item) : fileMenuItems(item);
+  return itemContextMenuItems(type, item);
 }
 
 function selectionMenuItems() {
@@ -1884,8 +2300,9 @@ function renderFileList(target, files, mode = "drive") {
 
     if (mode === "trash") {
       const items = [
-        { label: t("openFile"), handler: () => openFilePreview(file) },
+        { label: t("open"), handler: () => openFilePreview(file) },
         { label: t("download"), handler: () => downloadFile(file) },
+        { label: t("info"), handler: () => showItemInfo("file", file) },
         ...(file.thumbnailTelegramFileId
           ? [{ label: t("thumb"), handler: () => openThumbnailPreview(file) }]
           : []),
@@ -1959,9 +2376,16 @@ function showContextMenu(x, y, items) {
   const menu = $("#contextMenu");
   menu.innerHTML = "";
   items.forEach((item) => {
+    if (item.separator) {
+      const divider = document.createElement("div");
+      divider.className = "context-divider";
+      divider.setAttribute("role", "separator");
+      menu.appendChild(divider);
+      return;
+    }
     const btn = document.createElement("button");
     btn.type = "button";
-    btn.className = `context-item ${item.variant || ""}`;
+    btn.className = `context-item ${item.variant || ""}`.trim();
     btn.textContent = item.label;
     btn.disabled = Boolean(item.disabled);
     btn.addEventListener("click", async () => {
@@ -2017,7 +2441,8 @@ async function openFilePreview(file) {
   const body = $("#viewerBody");
   $("#viewerTitle").textContent = file.name;
   $("#viewerMeta").textContent = `${file.mimeType || ""} · ${formatBytes(file.size)}`;
-  $("#viewerDownloadButton").onclick = () => void downloadWithAuth(downloadUrl, file.name).catch(showError);
+  $("#viewerDownloadButton").onclick = () =>
+    void downloadWithAuth(downloadUrl, file.name, { knownTotalBytes: file.size }).catch(showError);
   body.innerHTML = "";
   body.className = "viewer-body";
   revealViewerBackdrop();
@@ -2109,7 +2534,9 @@ async function openFilePreview(file) {
     <strong>${escapeHtml(t("unsupportedPreview"))}</strong>
     <p>${escapeHtml(t("unsupportedPreviewHint"))}</p>
   `;
-  const btn = actionButton(t("download"), "", () => downloadWithAuth(downloadUrl, file.name));
+  const btn = actionButton(t("download"), "", () =>
+    downloadWithAuth(downloadUrl, file.name, { knownTotalBytes: file.size }),
+  );
   unsupported.appendChild(btn);
   body.appendChild(unsupported);
 }
@@ -2253,7 +2680,7 @@ async function downloadFile(file) {
     return;
   }
   try {
-    await downloadWithAuth(fileDownloadUrl(file), file.name);
+    await downloadWithAuth(fileDownloadUrl(file), file.name, { knownTotalBytes: file.size });
   } catch (err) {
     if (isTransferCanceled(err)) return;
     if (file.telegramMessageUrl) {
@@ -2315,43 +2742,50 @@ async function objectUrlWithAuth(url, opts = {}) {
   return objectUrl;
 }
 
-async function downloadWithAuth(url, filename) {
+async function downloadWithAuth(url, filename, opts = {}) {
   const transferId = createTransfer("download", filename || "download");
+  const knownTotalBytes = Math.max(0, Number(opts.knownTotalBytes || 0));
   const controller = new AbortController();
   state.transferAborters.set(transferId, () => controller.abort());
-  updateTransfer(transferId, { cancelable: true });
+  updateTransfer(transferId, {
+    cancelable: true,
+    total: knownTotalBytes,
+    downloadUrl: url,
+    knownTotalBytes,
+    error: false,
+  });
   try {
     const res = await fetchWithAuth(url, { signal: controller.signal });
     if (!res.ok) {
       updateTransfer(transferId, { status: `HTTP ${res.status}`, error: true, cancelable: false });
       throw new Error(`${res.status}: ${res.statusText}`);
     }
-    const total = Number(res.headers.get("content-length") || 0);
+    const headerTotal = Number(res.headers.get("content-length") || 0);
+    const total = Math.max(headerTotal, knownTotalBytes);
+    updateTransfer(transferId, { total, status: t("downloading") });
     const reader = res.body?.getReader();
     const chunks = [];
     let loaded = 0;
     let lastLoaded = 0;
     let lastTime = performance.now();
     if (reader) {
-      const startedAt = performance.now();
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
         chunks.push(value);
         loaded += value.byteLength;
-        const now = performance.now();
-        const elapsed = Math.max(1, now - lastTime) / 1000;
-        const instantSpeed = (loaded - lastLoaded) / elapsed;
-        const averageSpeed = loaded / Math.max(0.001, (now - startedAt) / 1000);
-        const speed = instantSpeed || averageSpeed;
+        const speed = measureTransferSpeed(transferId, loaded, lastLoaded, lastTime);
         lastLoaded = loaded;
-        lastTime = now;
-        updateTransfer(transferId, { loaded, total, speed });
+        lastTime = performance.now();
+        updateTransfer(transferId, { loaded, total, speed, status: t("downloading") });
       }
     } else {
       chunks.push(new Uint8Array(await res.arrayBuffer()));
       loaded = chunks[0].byteLength;
+      updateTransfer(transferId, { loaded, total: total || loaded, speed: 0, status: t("downloading") });
     }
+    const finalTotal = total > 0 ? total : loaded;
+    updateTransfer(transferId, { loaded, total: finalTotal, speed: 0, status: t("downloading") });
     const href = URL.createObjectURL(new Blob(chunks));
     const a = document.createElement("a");
     a.href = href;
@@ -2367,6 +2801,12 @@ async function downloadWithAuth(url, filename) {
       updateTransfer(transferId, { status: t("canceled"), error: true, speed: 0, cancelable: false });
       return;
     }
+    updateTransfer(transferId, {
+      status: err.message || String(err),
+      error: true,
+      speed: 0,
+      cancelable: false,
+    });
     throw err;
   } finally {
     state.transferAborters.delete(transferId);
@@ -2614,13 +3054,11 @@ async function saveSelfTelegram() {
 
 function renderSettingsSelf() {
   const root = $("#settingsSelfCard");
-  const adminWrap = $("#settingsAdminSection");
   if (!root) return;
   const profile = state.accountProfile;
   const headHint = $("#settingsHeadHint");
   if (!profile) {
     root.innerHTML = `<p class="settings-muted">${escapeHtml(t("loadingProfile"))}</p>`;
-    if (adminWrap) adminWrap.classList.add("hidden");
     if (headHint) headHint.textContent = "";
     return;
   }
@@ -2668,24 +3106,13 @@ function renderSettingsSelf() {
       ${hint}
     </article>`;
   wireSelfTelegramForm();
-  const sysWrap = $("#settingsSystemSection");
-  if (sysWrap) {
-    sysWrap.classList.toggle("hidden", !accountIsAdmin());
-  }
-  if (adminWrap) {
-    adminWrap.classList.toggle("hidden", !accountIsAdmin());
-  }
 }
 
 async function loadSettingsView() {
   renderSettingsSelf();
-  if (accountIsAdmin()) {
-    await loadRuntimeSettingsAdmin();
-    await loadAdminAccountsForSettings();
-  }
 }
 
-function renderRuntimeSettingsMarkup(data) {
+function renderRuntimeSettingsConfigMarkup(data) {
   const eff = data.effective || {};
   const rows = RUNTIME_ADMIN_FORM_ROWS.map(([key, kind]) => {
     const id = `sys_${key}`;
@@ -2705,7 +3132,6 @@ function renderRuntimeSettingsMarkup(data) {
     return `<label class="settings-runtime-row"><code>${escapeHtml(key)}</code><input class="settings-runtime-input" id="${id}" type="${inputType}"${stepAttr} value="${escapeHtml(str)}" /></label>`;
   }).join("");
   const overrides = (data.overriddenKeys || []).join(", ") || "—";
-  const queueJson = escapeHtml(JSON.stringify(data.queueWorkerEnv || {}, null, 2));
   return `
     <article class="admin-card settings-runtime-card">
       <div class="settings-runtime-fields">${rows}</div>
@@ -2713,12 +3139,52 @@ function renderRuntimeSettingsMarkup(data) {
         <button type="button" class="primary-action compact" id="settingsSystemSaveButton">${escapeHtml(t("runtimeSave"))}</button>
       </div>
       <p class="settings-muted"><strong>${escapeHtml(t("runtimeOverridesHint"))}:</strong> ${escapeHtml(overrides)}</p>
-    </article>
+    </article>`;
+}
+
+function renderRuntimeSettingsQueueMarkup(data) {
+  const queueJson = escapeHtml(JSON.stringify(data.queueWorkerEnv || {}, null, 2));
+  return `
     <article class="admin-card settings-queue-env-card">
-      <strong>${escapeHtml(t("queueWorkerTitle"))}</strong>
       <pre class="settings-runtime-pre">${queueJson}</pre>
       <p class="settings-muted">${escapeHtml(data.queueWorkerHint || "")}</p>
     </article>`;
+}
+
+function mountRuntimeSettingsAdmin(data) {
+  const configMount = $("#settingsSystemConfigMount");
+  const queueMount = $("#settingsSystemQueueMount");
+  if (!configMount || !queueMount) return;
+  configMount.innerHTML = renderRuntimeSettingsConfigMarkup(data);
+  queueMount.innerHTML = renderRuntimeSettingsQueueMarkup(data);
+  $("#settingsSystemSaveButton")?.addEventListener("click", () =>
+    void saveRuntimeSettings().catch(showError),
+  );
+}
+
+function setAdminSettingsTab(tab) {
+  if (!["config", "queue"].includes(tab)) {
+    tab = "config";
+  }
+  state.adminSettingsTab = tab;
+  $$(".settings-admin-tab").forEach((btn) => {
+    const active = btn.dataset.adminSettingsTab === tab;
+    btn.classList.toggle("active", active);
+    btn.setAttribute("aria-selected", String(active));
+    btn.tabIndex = active ? 0 : -1;
+  });
+  const configPanel = $("#settingsSystemConfigPanel");
+  const queuePanel = $("#settingsSystemQueuePanel");
+  if (configPanel) {
+    const showConfig = tab === "config";
+    configPanel.classList.toggle("hidden", !showConfig);
+    configPanel.hidden = !showConfig;
+  }
+  if (queuePanel) {
+    const showQueue = tab === "queue";
+    queuePanel.classList.toggle("hidden", !showQueue);
+    queuePanel.hidden = !showQueue;
+  }
 }
 
 function collectRuntimeSettingsPatch() {
@@ -2753,18 +3219,20 @@ function collectRuntimeSettingsPatch() {
 }
 
 async function loadRuntimeSettingsAdmin() {
-  const mount = $("#settingsSystemFormMount");
-  if (!mount || !accountIsAdmin()) return;
-  mount.innerHTML = `<p class="settings-muted">${escapeHtml(t("loadingProfile"))}</p>`;
+  const configMount = $("#settingsSystemConfigMount");
+  const queueMount = $("#settingsSystemQueueMount");
+  if (!configMount || !queueMount || !accountIsAdmin()) return;
+  const loading = `<p class="settings-muted">${escapeHtml(t("loadingProfile"))}</p>`;
+  configMount.innerHTML = loading;
+  queueMount.innerHTML = loading;
+  setAdminSettingsTab(state.adminSettingsTab || "config");
   try {
     const data = await api("/admin/settings");
     state.adminRuntimeSettings = data;
-    mount.innerHTML = renderRuntimeSettingsMarkup(data);
-    $("#settingsSystemSaveButton")?.addEventListener("click", () =>
-      void saveRuntimeSettings().catch(showError),
-    );
+    mountRuntimeSettingsAdmin(data);
   } catch (err) {
-    mount.innerHTML = "";
+    configMount.innerHTML = "";
+    queueMount.innerHTML = "";
     showError(err);
   }
 }
@@ -2781,10 +3249,7 @@ async function saveRuntimeSettings() {
     state.adminRuntimeSettings = res;
     toast(t("runtimeSaved"));
     await Promise.all([loadAppConfig(), loadQuota()]);
-    $("#settingsSystemFormMount").innerHTML = renderRuntimeSettingsMarkup(res);
-    $("#settingsSystemSaveButton")?.addEventListener("click", () =>
-      void saveRuntimeSettings().catch(showError),
-    );
+    mountRuntimeSettingsAdmin(res);
   } catch (err) {
     showError(err);
   } finally {
@@ -2793,22 +3258,27 @@ async function saveRuntimeSettings() {
   }
 }
 
-async function saveAccountQuotaRow(accountId, inputEl, buttonEl) {
-  const gb = Number(inputEl.value);
-  if (!Number.isFinite(gb) || gb < 0) {
+async function saveAccountAdminRow(accountId, roleEl, quotaEl, statusEl, buttonEl) {
+  const minioLimitGb = Number(quotaEl.value);
+  if (!Number.isFinite(minioLimitGb) || minioLimitGb < 0) {
     toast(t("inputRequired"));
     return;
   }
+  const body = {
+    role: roleEl.value,
+    minioLimitGb,
+    isActive: statusEl.value === "true",
+  };
   buttonEl.disabled = true;
   try {
-    await api(`/admin/accounts/${encodeURIComponent(accountId)}/quota`, {
+    await api(`/admin/accounts/${encodeURIComponent(accountId)}`, {
       method: "PATCH",
-      body: JSON.stringify({ minioLimitGb: gb }),
+      body: JSON.stringify(body),
     });
-    toast(t("quotaSaved"));
+    toast(t("accountSaved"));
     await loadAppConfig();
     await loadQuota();
-    await loadAdminAccountsForSettings();
+    await loadAdminAccountsView();
   } catch (err) {
     showError(err);
   } finally {
@@ -2816,8 +3286,8 @@ async function saveAccountQuotaRow(accountId, inputEl, buttonEl) {
   }
 }
 
-async function loadAdminAccountsForSettings() {
-  const wrap = $("#settingsAccountsTable");
+async function loadAdminAccountsView() {
+  const wrap = $("#accountsTableWrap");
   if (!wrap || !accountIsAdmin()) return;
   wrap.innerHTML = `<p class="settings-muted">${escapeHtml(t("loadingProfile"))}</p>`;
   try {
@@ -2829,22 +3299,45 @@ async function loadAdminAccountsForSettings() {
     thead.innerHTML = `<tr>
       <th>${escapeHtml(t("accountLabel"))}</th>
       <th>${escapeHtml(t("roleLabel"))}</th>
+      <th>${escapeHtml(t("accountTelegramUsage"))}</th>
+      <th>${escapeHtml(t("accountMinioUsage"))}</th>
       <th>${escapeHtml(t("accountMinioQuota"))}</th>
+      <th>${escapeHtml(t("accountStatus"))}</th>
       <th></th>
     </tr>`;
     table.appendChild(thead);
     const tbody = document.createElement("tbody");
+    const selfId = state.accountProfile?.id;
     for (const row of rows) {
       const tr = document.createElement("tr");
       const gbVal = Number(row.minioLimitGb ?? 0);
+      const isSelf = selfId && row.id === selfId;
+      const active = row.isActive !== false;
       tr.innerHTML = `
         <td>${escapeHtml(row.username)}</td>
-        <td>${escapeHtml(row.role)}</td>
+        <td>
+          <select class="settings-role-select" ${isSelf ? "disabled" : ""}>
+            <option value="user" ${row.role === "user" ? "selected" : ""}>user</option>
+            <option value="admin" ${row.role === "admin" ? "selected" : ""}>admin</option>
+          </select>
+        </td>
+        <td class="settings-usage-cell">${escapeHtml(formatBytes(Number(row.telegramBytes || 0)))}</td>
+        <td class="settings-usage-cell">${escapeHtml(formatAdminMinioUsage(row.minioBytes, row.minioLimitBytes))}</td>
         <td><input type="number" min="0" step="0.01" class="settings-quota-input" value="${gbVal}" /></td>
-        <td><button type="button" class="ghost compact settings-quota-save">${escapeHtml(t("saveQuota"))}</button></td>`;
-      const btn = tr.querySelector(".settings-quota-save");
-      const inp = tr.querySelector(".settings-quota-input");
-      btn.addEventListener("click", () => void saveAccountQuotaRow(row.id, inp, btn));
+        <td>
+          <select class="settings-status-select" ${isSelf ? "disabled" : ""}>
+            <option value="true" ${active ? "selected" : ""}>${escapeHtml(t("accountActive"))}</option>
+            <option value="false" ${!active ? "selected" : ""}>${escapeHtml(t("accountInactive"))}</option>
+          </select>
+        </td>
+        <td><button type="button" class="ghost compact settings-account-save">${escapeHtml(t("saveQuota"))}</button></td>`;
+      const btn = tr.querySelector(".settings-account-save");
+      const roleEl = tr.querySelector(".settings-role-select");
+      const quotaEl = tr.querySelector(".settings-quota-input");
+      const statusEl = tr.querySelector(".settings-status-select");
+      btn.addEventListener("click", () =>
+        void saveAccountAdminRow(row.id, roleEl, quotaEl, statusEl, btn),
+      );
       tbody.appendChild(tr);
     }
     table.appendChild(tbody);
@@ -3144,6 +3637,9 @@ async function uploadFile(file) {
 }
 
 async function uploadFileRecord(record) {
+  if (record.jobId) {
+    return { jobId: record.jobId, transferId: record.id };
+  }
   const form = new FormData();
   form.append("file", record.file, record.fileName);
   if (record.folderId && record.folderId !== ROOT) form.append("folderId", record.folderId);
@@ -3157,6 +3653,10 @@ async function uploadFileRecord(record) {
     record.file,
     record.id,
   );
+  record.jobId = queued.jobId;
+  record.status = "processing";
+  delete record.retryAfter;
+  await putUploadRecord(record);
   toast(`${t("uploaded")} #${queued.jobId}`);
   return queued;
 }
@@ -3172,19 +3672,15 @@ async function uploadWithProgress(path, form, file, transferId = createTransfer(
     xhr.setRequestHeader("X-Auth-Mode", "app");
     state.transferAborters.set(transferId, () => xhr.abort());
     xhr.upload.onprogress = (event) => {
-      const tr = state.transfers.get(transferId);
-      if (!tr) return;
-      const now = performance.now();
-      const elapsed = Math.max(1, now - lastTime) / 1000;
-      const instantSpeed = (event.loaded - lastLoaded) / elapsed;
-      const averageSpeed = event.loaded / Math.max(0.001, (now - tr.startedAt) / 1000);
-      const speed = instantSpeed || averageSpeed;
+      if (!state.transfers.get(transferId)) return;
+      const speed = measureTransferSpeed(transferId, event.loaded, lastLoaded, lastTime);
       lastLoaded = event.loaded;
-      lastTime = now;
+      lastTime = performance.now();
       updateTransfer(transferId, {
         loaded: event.loaded,
         total: event.total || file.size,
         speed,
+        status: t("uploading"),
       });
     };
     xhr.onload = () => {
@@ -3223,7 +3719,7 @@ async function uploadWithProgress(path, form, file, transferId = createTransfer(
 }
 
 async function uploadFiles(files) {
-  const list = Array.from(files || []).filter((file) => file && file.size >= 0);
+  const list = filterUploadableFiles(files).filter((file) => file && file.size >= 0);
   let queued = 0;
   for (const file of list) {
     if (await enqueueUpload(file, state.folderId)) queued++;
@@ -3252,6 +3748,66 @@ function isWebkitRelativeDirectoryArtifact(file) {
   if (!wrp) return false;
   const segments = wrp.split("/").filter(Boolean);
   return segments.length < 2;
+}
+
+function inferRootNameFromFile(file) {
+  const wrp = String(file?.webkitRelativePath || "").replace(/\\/g, "/").trim();
+  if (!wrp) return null;
+  return wrp.split("/").filter(Boolean)[0] || null;
+}
+
+function inferFolderDropRootName(files) {
+  const roots = new Set();
+  for (const file of files || []) {
+    const root = inferRootNameFromFile(file);
+    if (root) roots.add(root);
+  }
+  if (roots.size === 1) return [...roots][0];
+  return null;
+}
+
+function isLikelyDirectoryPlaceholderFile(file, rootName) {
+  if (!file) return false;
+  if (isWebkitRelativeDirectoryArtifact(file)) return true;
+  const root = String(rootName || inferRootNameFromFile(file) || "").trim();
+  const name = String(file.name || "").trim();
+  if (!root || name !== root) return false;
+  const wrp = String(file.webkitRelativePath || "").replace(/\\/g, "/").trim();
+  if (wrp) {
+    const segments = wrp.split("/").filter(Boolean);
+    return segments.length < 2;
+  }
+  return Number(file.size || 0) <= 4096;
+}
+
+function isFolderUploadEntryArtifact(entry, rootName) {
+  return isLikelyDirectoryPlaceholderFile(entry.file, rootName);
+}
+
+function filterUploadableFiles(files, rootName) {
+  const inferredRoot = rootName || inferFolderDropRootName(files);
+  return uniqueDroppedFiles(Array.from(files || [])).filter(
+    (file) => !isLikelyDirectoryPlaceholderFile(file, inferredRoot),
+  );
+}
+
+async function purgeFolderPlaceholderTransfers(rootName) {
+  const root = String(rootName || "").trim();
+  if (!root) return;
+  for (const [id, item] of [...state.transfers.entries()]) {
+    if (item.kind !== "upload" || item.name !== root) continue;
+    if (Number(item.total || 0) > 16384) continue;
+    state.transfers.delete(id);
+  }
+  const records = await getAllUploadRecords();
+  for (const record of records) {
+    const file = record.file;
+    if (file && !isLikelyDirectoryPlaceholderFile(file, root)) continue;
+    if (!file && record.fileName !== root) continue;
+    await deleteUploadRecord(record.id);
+    state.transfers.delete(record.id);
+  }
+  renderTransfers();
 }
 
 async function uploadFileToFolder(file, folderId) {
@@ -3284,7 +3840,9 @@ async function uploadFolderFromPicker() {
 async function uploadFolderEntries(rootName, entries) {
   if (!entries.length) return;
 
-  const filteredEntries = entries.filter((entry) => !isWebkitRelativeDirectoryArtifact(entry.file));
+  await purgeFolderPlaceholderTransfers(rootName);
+
+  const filteredEntries = entries.filter((entry) => !isFolderUploadEntryArtifact(entry, rootName));
 
   const validEntries = [];
   let skipped = 0;
@@ -3334,6 +3892,7 @@ async function uploadFolderEntries(rootName, entries) {
     void processUploadQueue().catch(showError);
     toast(`${queuedUploads.length} ${t("queued")}${skipped ? ` · ${skipped} ${t("uploadTooLarge")}` : ""}`);
   }
+  await purgeFolderPlaceholderTransfers(rootName);
   await Promise.all([loadDrive(), loadQuota()]);
 }
 
@@ -3350,17 +3909,33 @@ async function uploadDroppedItems(dataTransfer) {
   });
 
   if (directFiles.length && !hasDirectoryEntry) {
-    const files = uniqueDroppedFiles(directFiles);
-    toast(`${files.length} ${t("queued")}`);
-    await uploadFiles(files);
+    const inferredRoot = inferFolderDropRootName(directFiles);
+    const withRelativePath = directFiles.filter((file) => file.webkitRelativePath);
+    const withoutRelativePath = filterUploadableFiles(
+      directFiles.filter((file) => !file.webkitRelativePath),
+      inferredRoot,
+    );
+    if (inferredRoot && withRelativePath.length) {
+      const entries = withRelativePath.map((file) => ({
+        file,
+        relativePath: normalizedFolderEntryRelativePath(file.webkitRelativePath, file.name),
+      }));
+      await uploadFolderEntries(inferredRoot, entries);
+    }
+    if (withoutRelativePath.length) {
+      toast(`${withoutRelativePath.length} ${t("queued")}`);
+      await uploadFiles(withoutRelativePath);
+    }
     return;
   }
 
+  let handledDirectoryDrop = false;
   const looseFiles = [];
   for (const item of items) {
     try {
       const entry = typeof item.webkitGetAsEntry === "function" ? item.webkitGetAsEntry() : null;
       if (entry?.isDirectory) {
+        handledDirectoryDrop = true;
         const files = await readDirectoryEntry(entry);
         await uploadFolderEntries(entry.name, files);
       } else if (entry?.isFile) {
@@ -3375,10 +3950,14 @@ async function uploadDroppedItems(dataTransfer) {
     }
   }
 
-  looseFiles.push(...directFiles);
+  if (!handledDirectoryDrop) {
+    looseFiles.push(...directFiles);
+  }
 
   if (looseFiles.length) {
-    const files = uniqueDroppedFiles(looseFiles);
+    const inferredRoot = inferFolderDropRootName(looseFiles);
+    const files = filterUploadableFiles(looseFiles, inferredRoot);
+    if (!files.length) return;
     toast(`${files.length} ${t("queued")}`);
     await uploadFiles(files);
   }
@@ -3580,6 +4159,21 @@ async function moveFile(file) {
   await refreshAfterFilePatch(saved.id);
 }
 
+async function moveFolder(folder) {
+  const parentId = await openFolderPicker({
+    title: t("move"),
+  });
+  if (!parentId) return;
+  await withFolderProcessing([folder.id], () =>
+    api(`/folders/${folder.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ parentId }),
+    }),
+  );
+  toast(t("moved"));
+  await refreshAfterFilePatch();
+}
+
 async function deleteSelectedFiles() {
   const folders = selectedVisibleFolders();
   const files = selectedVisibleFiles();
@@ -3644,16 +4238,26 @@ async function refreshAfterFilePatch() {
   await loadDrive();
 }
 
-async function showFileInfo(fileId) {
-  const [meta, tags] = await Promise.all([
-    api(`/files/${fileId}`),
-    api(`/files/${fileId}/tags`),
-  ]);
-  const payload = { meta, tags };
-  if (accountIsAdmin()) {
-    showAdminOutput(payload);
-    setView("admin");
-    return;
+async function showItemInfo(type, item) {
+  let payload;
+  if (type === "folder") {
+    const contents = await api(
+      `/folders/${encodeURIComponent(item.id)}/contents?folderLimit=500&fileLimit=500`,
+    );
+    payload = {
+      id: item.id,
+      name: item.name,
+      parentId: item.parentId ?? null,
+      deletedAt: item.deletedAt ?? null,
+      childFolders: (contents.folders || []).length,
+      files: (contents.files || []).length,
+    };
+  } else {
+    const [meta, tags] = await Promise.all([
+      api(`/files/${item.id}`),
+      api(`/files/${item.id}/tags`),
+    ]);
+    payload = { ...meta, tags };
   }
   await openReadOnlyInfoModal(t("info"), JSON.stringify(payload, null, 2));
 }
@@ -3829,6 +4433,8 @@ async function runSearch(form) {
 }
 
 function wireEvents() {
+  window.addEventListener("pagehide", persistActiveTransferSnapshots);
+  wireReloadTransferGuard();
   window.addEventListener("click", hideContextMenu);
   window.addEventListener("scroll", hideContextMenu, true);
   window.addEventListener("keydown", (event) => {
@@ -3864,7 +4470,7 @@ function wireEvents() {
     if (performance.now() < state.previewBackdropGuardUntil) return;
     closeFilePreview();
   });
-  $("#logoutButton").addEventListener("click", logout);
+  $("#logoutButton").addEventListener("click", () => void logout().catch(showError));
   $("#transferClearButton").addEventListener("click", clearCompletedTransfers);
   $("#transferCollapseButton").addEventListener("click", toggleTransfersCollapsed);
   $("#viewToggleButton").addEventListener("click", toggleFileView);
@@ -3976,12 +4582,15 @@ function wireEvents() {
     event.target.value = "";
     void importMysqlDump(file).catch(showError);
   });
-  $("#settingsAccountsRefreshButton")?.addEventListener("click", () =>
-    void loadAdminAccountsForSettings().catch(showError),
+  $("#accountsRefreshButton")?.addEventListener("click", () =>
+    void loadAdminAccountsView().catch(showError),
   );
   $("#settingsSystemRefreshButton")?.addEventListener("click", () =>
     void loadRuntimeSettingsAdmin().catch(showError),
   );
+  $$(".settings-admin-tab").forEach((btn) => {
+    btn.addEventListener("click", () => setAdminSettingsTab(btn.dataset.adminSettingsTab));
+  });
 }
 
 async function adminGet(path) {
@@ -4079,6 +4688,7 @@ async function init() {
     applyLanguage();
     setView(state.view, { persist: false, load: false });
     await restoreUploadTransfers();
+    restoreActiveTransferSnapshots();
     void processUploadQueue().catch(showError);
     await Promise.all([loadQuota(), loadDrive()]);
     if (state.searchActive) {
@@ -4087,6 +4697,8 @@ async function init() {
     if (state.view === "trash") await loadTrash();
     if (state.view === "queue") await loadQueue();
     if (state.view === "settings") await loadSettingsView();
+    if (state.view === "admin" && accountIsAdmin()) await loadRuntimeSettingsAdmin();
+    if (state.view === "accounts" && accountIsAdmin()) await loadAdminAccountsView();
     persistNavigationState();
   } catch (err) {
     showError(err);

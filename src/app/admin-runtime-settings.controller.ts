@@ -32,7 +32,7 @@ export class AdminRuntimeSettingsController {
   @ApiOperation({
     summary: 'Cấu hình vận hành (runtime)',
     description:
-      'Khi khởi động, các khóa Cài đặt server thiếu được tạo trong `app_settings`. `TELEGRAM_STORAGE_CHAT_FOR_PUBLIC_ID` chỉ DB/UI (không đọc env). `TELEGRAM_ALERT_CHAT_ID` chỉ đọc từ DB khi đọc hiệu lực (không fallback env). Bot token trên admin đầu tiên. UPLOAD_QUEUE_* chỉ đọc khi worker khởi động.',
+      'Khi khởi động, các khóa Cài đặt server thiếu được tạo trong `app_settings` (lần đầu có thể lấy từ env). Khi đã có trong DB, giá trị hiệu lực chỉ từ DB — không fallback env. `TELEGRAM_STORAGE_CHAT_FOR_PUBLIC_ID` / `TELEGRAM_ALERT_CHAT_ID` không fallback env nếu chưa có dòng DB. Bot token trên admin đầu tiên. UPLOAD_QUEUE_* chỉ đọc khi worker khởi động.',
   })
   @ApiOkResponse()
   get(): {

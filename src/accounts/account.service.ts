@@ -21,10 +21,13 @@ import { hashPassword } from './password-hash.util';
 export interface RegisterAccountInput {
   username: string;
   password: string;
-  /** Mặc định true — dùng bot/chat của admin đầu tiên; false = bắt buộc token + chat riêng. */
+  /** Mặc định true — dùng bot/chat chung với hệ thống; false = bắt buộc token + chat riêng. */
   usePlatformTelegramStorage?: boolean;
   telegramBotToken?: string;
   telegramStorageChatId?: string;
+  telegramStorageChatForPublicId?: string;
+  publicAppUrl?: string;
+  telegramAlertChatId?: string;
 }
 
 export interface CreateAccountAdminInput {
@@ -41,7 +44,7 @@ export interface CreateAccountAdminInput {
 export class AccountService {
   private primaryAdminId: string | null = null;
 
-  /** Bot từ admin đầu tiên + chat lưu: **ưu tiên** `TELEGRAM_STORAGE_CHAT_FOR_PUBLIC_ID` (Cài đặt server), không có thì chat trên admin đầu tiên. */
+  /** Bot từ admin + chat lưu: **ưu tiên** `TELEGRAM_STORAGE_CHAT_FOR_PUBLIC_ID` (Cài đặt server), không có thì chat đã lưu trên tài khoản admin. */
   private platformMergeDefaults: {
     telegramBotToken: string;
     telegramStorageChatId: string;
@@ -55,7 +58,7 @@ export class AccountService {
     private readonly runtime: RuntimeConfigService,
   ) {}
 
-  /** Cache để `/auth/verify` biết admin đầu tiên (sync). */
+  /** Cache để `/auth/verify` biết tài khoản admin chính (sync). */
   isPrimaryAdminSync(accountId: string): boolean {
     return this.primaryAdminId !== null && this.primaryAdminId === accountId;
   }
@@ -141,7 +144,7 @@ export class AccountService {
     return this.accountRepo.findOne({ where: { username: u } });
   }
 
-  /** Webhook đồng bộ ngược: khớp chat trên account hoặc chat chung trong Cài đặt server → admin đầu tiên. */
+  /** Webhook đồng bộ ngược: khớp chat trên account hoặc chat chung trong Cài đặt server → admin. */
   async findByTelegramStorageChatId(chatId: string): Promise<Account | null> {
     const c = chatId.trim();
     if (!c) return null;
@@ -178,11 +181,31 @@ export class AccountService {
       throw new BadRequestException('password tối thiểu 6 ký tự');
     }
 
+    const isFirstAccount = (await this.accountRepo.count()) === 0;
+    let bootstrapPublicChatId: string | null = null;
+    let bootstrapPublicAppUrl: string | null = null;
+    let bootstrapAlertChatId: string | null = null;
+    if (isFirstAccount) {
+      const token = (input.telegramBotToken ?? '').trim();
+      const chatId = (input.telegramStorageChatId ?? '').trim();
+      const publicChatId = (input.telegramStorageChatForPublicId ?? '').trim();
+      const publicAppUrl = this.normalizePublicAppUrl(input.publicAppUrl ?? '');
+      const alertChatId = (input.telegramAlertChatId ?? '').trim();
+      if (!token || !chatId || !publicChatId || !publicAppUrl) {
+        throw new BadRequestException(
+          'Tài khoản admin đầu tiên cần đủ bot token, chat ID lưu file, URL gốc ứng dụng và chat/kênh lưu chung.',
+        );
+      }
+      bootstrapPublicChatId = publicChatId;
+      bootstrapPublicAppUrl = publicAppUrl;
+      if (alertChatId) {
+        bootstrapAlertChatId = alertChatId;
+      }
+    }
+
     const saved = await this.accountRepo.manager.transaction(async (manager) => {
       const accountRepo = manager.getRepository(Account);
       const folderRepo = manager.getRepository(Folder);
-
-      const isFirstAccount = (await accountRepo.count()) === 0;
 
       const exists = await accountRepo.exist({ where: { username } });
       if (exists) {
@@ -195,27 +218,9 @@ export class AccountService {
       let telegramUsePlatformDefaults: boolean;
 
       if (isFirstAccount) {
-        const merge = this.getPlatformTelegramMergeDefaultsSync();
-        const token = (input.telegramBotToken ?? '').trim();
-        const chatId = (input.telegramStorageChatId ?? '').trim();
-
-        if (usePlatform && merge) {
-          telegramBotToken = null;
-          telegramStorageChatId = null;
-          telegramUsePlatformDefaults = true;
-        } else if (token && chatId) {
-          telegramBotToken = token;
-          telegramStorageChatId = chatId;
-          telegramUsePlatformDefaults = false;
-        } else if (!token && !chatId) {
-          telegramBotToken = null;
-          telegramStorageChatId = null;
-          telegramUsePlatformDefaults = false;
-        } else {
-          throw new BadRequestException(
-            'Cần đủ bot token và chat ID, hoặc để trống cả hai để cấu hình sau trong Cài đặt.',
-          );
-        }
+        telegramBotToken = (input.telegramBotToken ?? '').trim();
+        telegramStorageChatId = (input.telegramStorageChatId ?? '').trim();
+        telegramUsePlatformDefaults = false;
 
         const accountDraft = accountRepo.create({
           username,
@@ -264,7 +269,7 @@ export class AccountService {
       if (usePlatform) {
         if (!this.getPlatformTelegramMergeDefaultsSync()) {
           throw new BadRequestException(
-            'Chưa cấu đủ bot token (admin đầu tiên) và chat lưu chung (TELEGRAM_STORAGE_CHAT_FOR_PUBLIC_ID trong Cài đặt server hoặc chat trên tài khoản đó) — không thể đăng ký chế độ dùng chung.',
+            'Chưa cấu đủ bot token (admin) và chat lưu chung (TELEGRAM_STORAGE_CHAT_FOR_PUBLIC_ID trong Cài đặt server hoặc chat trên tài khoản đó) — không thể đăng ký chế độ dùng chung.',
           );
         }
         stToken = null;
@@ -305,8 +310,40 @@ export class AccountService {
       return acc;
     });
 
+    if (bootstrapPublicChatId !== null) {
+      await this.runtime.upsertPatchableSetting(
+        EnvKey.TELEGRAM_STORAGE_CHAT_FOR_PUBLIC_ID,
+        bootstrapPublicChatId,
+      );
+    }
+    if (bootstrapPublicAppUrl !== null) {
+      await this.runtime.upsertPatchableSetting(
+        EnvKey.PUBLIC_APP_URL,
+        bootstrapPublicAppUrl,
+      );
+    }
+    if (bootstrapAlertChatId !== null) {
+      await this.runtime.upsertPatchableSetting(
+        EnvKey.TELEGRAM_ALERT_CHAT_ID,
+        bootstrapAlertChatId,
+      );
+    }
+
     await this.refreshPlatformTelegramMergeDefaults();
     return saved;
+  }
+
+  private normalizePublicAppUrl(raw: string): string {
+    const url = raw.trim().replace(/\/+$/, '');
+    if (!url) {
+      return '';
+    }
+    if (!/^https?:\/\//i.test(url)) {
+      throw new BadRequestException(
+        'PUBLIC_APP_URL phải bắt đầu bằng http:// hoặc https://',
+      );
+    }
+    return url;
   }
 
   async createAccountByAdmin(input: CreateAccountAdminInput): Promise<Account> {
@@ -331,7 +368,7 @@ export class AccountService {
     if (usePlatform) {
       if (!this.getPlatformTelegramMergeDefaultsSync()) {
         throw new BadRequestException(
-          'Chưa đủ bot token (admin đầu tiên) và chat lưu chung (TELEGRAM_STORAGE_CHAT_FOR_PUBLIC_ID hoặc chat trên tài khoản đó) — không thể tạo user chế độ dùng chung.',
+          'Chưa đủ bot token (admin) và chat lưu chung (TELEGRAM_STORAGE_CHAT_FOR_PUBLIC_ID hoặc chat trên tài khoản đó) — không thể tạo user chế độ dùng chung.',
         );
       }
       telegramBotToken = null;
@@ -369,15 +406,69 @@ export class AccountService {
   }
 
   async updateAccountQuota(accountId: string, minioLimitGb: number): Promise<Account> {
+    return this.updateAccountByAdmin(accountId, { minioLimitGb }, { actorId: null });
+  }
+
+  private async countActiveAdmins(): Promise<number> {
+    return this.accountRepo.count({
+      where: { role: AccountRole.ADMIN, isActive: true },
+    });
+  }
+
+  async updateAccountByAdmin(
+    accountId: string,
+    patch: {
+      role?: AccountRole;
+      minioLimitGb?: number;
+      isActive?: boolean;
+    },
+    opts: { actorId: string | null },
+  ): Promise<Account> {
     const acc = await this.accountRepo.findOne({ where: { id: accountId } });
     if (!acc) {
       throw new NotFoundException('Không tìm thấy account');
     }
-    const gb = Number(minioLimitGb);
-    if (!Number.isFinite(gb) || gb < 0) {
-      throw new BadRequestException('minioLimitGb không hợp lệ');
+
+    const actorId = opts.actorId;
+    if (actorId && actorId === acc.id) {
+      if (patch.isActive === false) {
+        throw new BadRequestException('Không thể vô hiệu hóa tài khoản đang đăng nhập.');
+      }
+      if (patch.role !== undefined && patch.role !== acc.role) {
+        throw new BadRequestException('Không thể đổi role của chính mình từ đây.');
+      }
     }
-    acc.minioLimitGb = gb;
+
+    const nextRole = patch.role ?? acc.role;
+    const nextActive = patch.isActive ?? acc.isActive;
+    const demotingAdmin =
+      acc.role === AccountRole.ADMIN &&
+      nextRole === AccountRole.USER;
+    const deactivatingAdmin =
+      acc.role === AccountRole.ADMIN &&
+      acc.isActive &&
+      nextActive === false;
+    if (demotingAdmin || deactivatingAdmin) {
+      const activeAdmins = await this.countActiveAdmins();
+      if (activeAdmins <= 1) {
+        throw new BadRequestException('Phải còn ít nhất một admin đang hoạt động.');
+      }
+    }
+
+    if (patch.role !== undefined) {
+      acc.role = patch.role;
+    }
+    if (patch.isActive !== undefined) {
+      acc.isActive = patch.isActive;
+    }
+    if (patch.minioLimitGb !== undefined) {
+      const gb = Number(patch.minioLimitGb);
+      if (!Number.isFinite(gb) || gb < 0) {
+        throw new BadRequestException('minioLimitGb không hợp lệ');
+      }
+      acc.minioLimitGb = gb;
+    }
+
     return this.accountRepo.save(acc);
   }
 
@@ -403,7 +494,7 @@ export class AccountService {
     if (usePlatform) {
       if (!this.getPlatformTelegramMergeDefaultsSync()) {
         throw new BadRequestException(
-          'Chưa đủ bot token (admin đầu tiên) và chat lưu chung (TELEGRAM_STORAGE_CHAT_FOR_PUBLIC_ID hoặc chat trên tài khoản đó) — chưa thể bật chế độ chung.',
+          'Chưa đủ bot token (admin) và chat lưu chung (TELEGRAM_STORAGE_CHAT_FOR_PUBLIC_ID hoặc chat trên tài khoản đó) — chưa thể bật chế độ chung.',
         );
       }
       acc.telegramBotToken = null;

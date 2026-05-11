@@ -8,10 +8,12 @@ import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { EnvKey } from '../common/env-keys';
+import { ROOT_FOLDER_ALIAS } from '../storage/domain/constants';
 import { UploadDefaults } from '../common/upload.defaults';
 import { AppSetting } from './app-setting.entity';
 import {
   ADMIN_PATCHABLE_KEYS,
+  ADMIN_PATCHABLE_KEY_SET,
   ADMIN_READONLY_QUEUE_KEYS,
   TELEGRAM_DB_ONLY_KEYS,
   type AdminPatchableKey,
@@ -56,7 +58,7 @@ export class RuntimeConfigService implements OnModuleInit {
 
   /**
    * Lần đầu chạy (hoặc sau khi xóa tay): tạo đủ dòng `app_settings` cho mọi khóa Cài đặt server.
-   * Giá trị lấy từ env / `.env` qua ConfigService và fallback giống logic đọc hiệu lực — không ghi đè dòng đã có.
+   * Giá trị lấy từ env / `.env` (lần đầu thiếu trong DB) — không ghi đè dòng đã có.
    */
   private async ensureAllPatchableSettingsSeeded(): Promise<void> {
     let inserted = 0;
@@ -64,7 +66,7 @@ export class RuntimeConfigService implements OnModuleInit {
       if (this.overrides.has(key)) {
         continue;
       }
-      const value = this.initialStoredValueForKey(key);
+      const value = this.patchableStoredValue(key, { allowEnv: true });
       await this.repo.save(this.repo.create({ key, value }));
       inserted += 1;
     }
@@ -75,30 +77,48 @@ export class RuntimeConfigService implements OnModuleInit {
     }
   }
 
-  /** Giá trị lưu DB lần đầu — chỉ env + default code, không đọc bảng overrides. */
-  private initialStoredValueForKey(key: AdminPatchableKey): string {
-    const get = (k: string) => this.config.get<string>(k);
+  /**
+   * Giá trị cho khóa Cài đặt server.
+   * `allowEnv: true` — lúc seed DB lần đầu (đọc env / `.env`).
+   * `allowEnv: false` — lúc đọc hiệu lực mà chưa có dòng DB: chỉ default code + `APP_PORT`, không env.
+   */
+  private patchableStoredValue(
+    key: AdminPatchableKey,
+    opts: { allowEnv: boolean },
+  ): string {
+    const { allowEnv } = opts;
+    const get = (k: string) => (allowEnv ? this.config.get<string>(k) : undefined);
     const trim = (v: string | undefined) => (v ?? '').trim();
 
     switch (key) {
-      case EnvKey.PUBLIC_APP_URL:
-        return trim(get(EnvKey.PUBLIC_APP_URL));
+      case EnvKey.PUBLIC_APP_URL: {
+        const fromEnv = allowEnv ? trim(get(EnvKey.PUBLIC_APP_URL)) : '';
+        if (fromEnv) {
+          return fromEnv;
+        }
+        const port = trim(this.config.get<string>(EnvKey.APP_PORT)) || '3000';
+        return `http://localhost:${port}`;
+      }
       case EnvKey.TELEGRAM_STORAGE_CHAT_FOR_PUBLIC_ID:
         return '';
       case EnvKey.TELEGRAM_ALERT_CHAT_ID:
-        return trim(get(EnvKey.TELEGRAM_ALERT_CHAT_ID));
-      case EnvKey.TELEGRAM_SYNC_FOLDER_ID:
-        return trim(get(EnvKey.TELEGRAM_SYNC_FOLDER_ID));
+        return allowEnv ? trim(get(EnvKey.TELEGRAM_ALERT_CHAT_ID)) : '';
+      case EnvKey.TELEGRAM_SYNC_FOLDER_ID: {
+        const fromEnv = allowEnv ? trim(get(EnvKey.TELEGRAM_SYNC_FOLDER_ID)) : '';
+        return fromEnv || ROOT_FOLDER_ALIAS;
+      }
       case EnvKey.SHARE_RATE_LIMIT_TTL_MS: {
-        const n = Number(get(EnvKey.SHARE_RATE_LIMIT_TTL_MS) ?? '60000');
+        const n = Number(
+          (allowEnv ? get(EnvKey.SHARE_RATE_LIMIT_TTL_MS) : undefined) ?? '60000',
+        );
         return String(Math.max(1000, Number.isFinite(n) ? n : 60000));
       }
       case EnvKey.SHARE_RATE_LIMIT_MAX: {
-        const n = Number(get(EnvKey.SHARE_RATE_LIMIT_MAX) ?? '60');
+        const n = Number((allowEnv ? get(EnvKey.SHARE_RATE_LIMIT_MAX) : undefined) ?? '60');
         return String(Math.max(1, Number.isFinite(n) ? n : 60));
       }
       case EnvKey.FOLDER_ZIP_MAX_FILES: {
-        const raw = trim(get(EnvKey.FOLDER_ZIP_MAX_FILES));
+        const raw = allowEnv ? trim(get(EnvKey.FOLDER_ZIP_MAX_FILES)) : '';
         if (!raw) {
           return '2000';
         }
@@ -109,14 +129,14 @@ export class RuntimeConfigService implements OnModuleInit {
         return String(Math.min(Math.floor(n), 50000));
       }
       case EnvKey.FOLDER_ZIP_DOWNLOAD_TOKEN_TTL_SECONDS: {
-        const raw = trim(get(EnvKey.FOLDER_ZIP_DOWNLOAD_TOKEN_TTL_SECONDS));
+        const raw = allowEnv ? trim(get(EnvKey.FOLDER_ZIP_DOWNLOAD_TOKEN_TTL_SECONDS)) : '';
         const n = raw !== '' ? Number(raw) : 3600;
         const ttl = Math.min(Math.max(Number.isFinite(n) ? n : 3600, 60), 604800);
         return String(ttl);
       }
       case EnvKey.TELEGRAM_DOWNLOAD_MAX_MB: {
         const mb = Number(
-          get(EnvKey.TELEGRAM_DOWNLOAD_MAX_MB) ??
+          (allowEnv ? get(EnvKey.TELEGRAM_DOWNLOAD_MAX_MB) : undefined) ??
             String(UploadDefaults.TELEGRAM_DOWNLOAD_MAX_MB_FALLBACK),
         );
         const safe = Number.isFinite(mb)
@@ -125,16 +145,18 @@ export class RuntimeConfigService implements OnModuleInit {
         return String(Math.max(1, Math.floor(safe)));
       }
       case EnvKey.MYSQL_IMPORT_MAX_MB: {
-        const mb = Number(get(EnvKey.MYSQL_IMPORT_MAX_MB) ?? '512');
+        const mb = Number((allowEnv ? get(EnvKey.MYSQL_IMPORT_MAX_MB) : undefined) ?? '512');
         const safe = Number.isFinite(mb) && mb > 0 ? mb : 512;
         return String(Math.floor(safe));
       }
       case EnvKey.MYSQL_BACKUP_ENABLED:
-        return trim(get(EnvKey.MYSQL_BACKUP_ENABLED)) === 'true' ? 'true' : 'false';
+        return allowEnv && trim(get(EnvKey.MYSQL_BACKUP_ENABLED)) === 'true'
+          ? 'true'
+          : 'false';
       case EnvKey.MYSQL_BACKUP_CRON:
-        return trim(get(EnvKey.MYSQL_BACKUP_CRON)) || '0 3 * * 0';
+        return (allowEnv ? trim(get(EnvKey.MYSQL_BACKUP_CRON)) : '') || '0 3 * * 0';
       case EnvKey.MYSQL_BACKUP_FOLDER_NAME:
-        return trim(get(EnvKey.MYSQL_BACKUP_FOLDER_NAME)) || 'backup';
+        return (allowEnv ? trim(get(EnvKey.MYSQL_BACKUP_FOLDER_NAME)) : '') || 'backup';
       default: {
         const _exhaustive: never = key;
         return _exhaustive;
@@ -147,10 +169,19 @@ export class RuntimeConfigService implements OnModuleInit {
     this.overrides = new Map(rows.map((r) => [r.key, r.value]));
   }
 
-  /** Raw effective: DB row wins if present (kể cả chuỗi rỗng). */
+  /**
+   * Raw hiệu lực: với khóa Cài đặt server (`ADMIN_PATCHABLE_KEYS`), có dòng `app_settings` thì chỉ DB
+   * (kể cả chuỗi rỗng); thiếu dòng thì default trong code — không đọc env cho các khóa đó.
+   */
   effectiveRaw(key: string): string | undefined {
     if (this.telegramDbOnly.has(key)) {
       return this.overrides.has(key) ? this.overrides.get(key) : undefined;
+    }
+    if (ADMIN_PATCHABLE_KEY_SET.has(key)) {
+      if (this.overrides.has(key)) {
+        return this.overrides.get(key);
+      }
+      return this.patchableStoredValue(key as AdminPatchableKey, { allowEnv: false });
     }
     if (this.overrides.has(key)) {
       return this.overrides.get(key);
@@ -312,5 +343,11 @@ export class RuntimeConfigService implements OnModuleInit {
     }
 
     this.log.log(`Đã cập nhật ${entries.length} cấu hình runtime`);
+  }
+
+  async upsertPatchableSetting(key: AdminPatchableKey, value: string): Promise<void> {
+    const str = value.trim();
+    await this.repo.save(this.repo.create({ key, value: str }));
+    this.overrides.set(key, str);
   }
 }
