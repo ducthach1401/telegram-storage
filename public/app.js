@@ -15,6 +15,7 @@ function readAuthCookie() {
 const VIEW_STORAGE_KEY = "tg-drive-file-view";
 const NAV_STORAGE_KEY = "tg-drive-nav-state";
 const ACTIVE_TRANSFER_STORAGE_KEY = "tg-drive-active-transfers";
+const MUSIC_LIBRARY_STORAGE_PREFIX = "tg-drive-music-library";
 
 /** Khớp PATCH /admin/settings (không gồm queue worker). */
 const RUNTIME_ADMIN_FORM_ROWS = [
@@ -40,6 +41,8 @@ const UPLOAD_RETRY_DELAY_MS = 15000;
 const UPLOAD_JOB_POLL_QUICK_MS = 1200;
 const UPLOAD_JOB_POLL_MEDIUM_MS = 3000;
 const UPLOAD_JOB_POLL_SLOW_MS = 5000;
+/** Khớp TELEGRAM_ONLY_UPLOAD_MAX_BYTES — file ≥ mức này mới tính quota MinIO account. */
+const TELEGRAM_ONLY_UPLOAD_MAX_BYTES = 20 * 1024 * 1024;
 const objectUrlCache = new Map();
 
 function isCompactTransferMode() {
@@ -82,6 +85,21 @@ const i18n = {
     drive: "Drive",
     images: "Ảnh",
     imagesHint: "Tất cả ảnh đã tải lên, mới nhất trước.",
+    music: "Âm nhạc",
+    musicHint: "Nghe các file audio đã tải lên, mới nhất trước.",
+    musicPlaylists: "Playlist",
+    musicAllTracks: "Tất cả bài",
+    musicQueue: "Danh sách phát",
+    musicCreatePlaylist: "Tạo playlist",
+    musicPlaylistNamePrompt: "Tên playlist",
+    musicClearQueue: "Xóa danh sách phát",
+    musicAddToPlaylist: "Thêm vào playlist",
+    musicAddToQueue: "Thêm vào danh sách phát",
+    musicRemoveFromQueue: "Xóa khỏi danh sách phát",
+    musicAddedToPlaylist: "Đã thêm vào playlist",
+    musicAddedToQueue: "Đã thêm vào danh sách phát",
+    musicQueueEmpty: "Danh sách phát trống.",
+    musicPlaylistEmpty: "Playlist trống.",
     search: "Tìm kiếm",
     trash: "Thùng rác",
     queue: "Queue lỗi",
@@ -282,6 +300,21 @@ const i18n = {
     drive: "Drive",
     images: "Images",
     imagesHint: "All uploaded images, newest first.",
+    music: "Music",
+    musicHint: "Listen to uploaded audio files, newest first.",
+    musicPlaylists: "Playlists",
+    musicAllTracks: "All tracks",
+    musicQueue: "Play queue",
+    musicCreatePlaylist: "Create playlist",
+    musicPlaylistNamePrompt: "Playlist name",
+    musicClearQueue: "Clear play queue",
+    musicAddToPlaylist: "Add to playlist",
+    musicAddToQueue: "Add to play queue",
+    musicRemoveFromQueue: "Remove from play queue",
+    musicAddedToPlaylist: "Added to playlist",
+    musicAddedToQueue: "Added to play queue",
+    musicQueueEmpty: "Play queue is empty.",
+    musicPlaylistEmpty: "Playlist is empty.",
     search: "Search",
     trash: "Trash",
     queue: "Failed queue",
@@ -481,12 +514,21 @@ const state = {
   uploadRetryTimer: null,
   uploadQueueSuppressed: false,
   maxUploadBytes: 50 * 1024 * 1024 * 1024,
+  minioQuotaUsedBytes: 0,
+  minioQuotaLimitBytes: 0,
   selectionMode: false,
   /** Ignore backdrop closes immediately after open (double-click ghost click). */
   previewBackdropGuardUntil: 0,
   /** Payload gần nhất từ GET /auth/verify (sau applyAppConfig). */
   accountProfile: null,
   adminSettingsTab: "config",
+  musicPlayingId: null,
+  musicFiles: [],
+  musicLibrarySource: "all",
+  musicPlaylists: [],
+  musicQueue: [],
+  lastContextMenuX: 0,
+  lastContextMenuY: 0,
 };
 
 function parseStoredJson(key) {
@@ -510,7 +552,7 @@ function isAdminOnlyView(view) {
 }
 
 function isFileBrowserView(view = state.view) {
-  return view === "drive" || view === "images";
+  return view === "drive" || view === "images" || view === "music";
 }
 
 function formatBytes(bytes) {
@@ -1065,7 +1107,9 @@ async function enqueueUpload(file, folderId = state.folderId) {
   if (isLikelyDirectoryPlaceholderFile(file, inferRootNameFromFile(file))) {
     return null;
   }
-  if (!canUploadFile(file)) {
+  const rejectReason = getUploadRejectReason(file);
+  if (rejectReason) {
+    recordUploadRejected(file, rejectReason);
     return null;
   }
   const id = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -1090,11 +1134,54 @@ async function enqueueUpload(file, folderId = state.folderId) {
   return id;
 }
 
+function usesAccountMinioQuota(file) {
+  return Number(file?.size || 0) >= TELEGRAM_ONLY_UPLOAD_MAX_BYTES;
+}
+
+function isMinioQuotaUploadError(message) {
+  const value = String(message || "").toLowerCase();
+  return (
+    value.includes("vượt giới hạn") ||
+    value.includes("quota minio") ||
+    value.includes("minio quota") ||
+    value.includes("exceeds the minio") ||
+    value.includes("file vượt giới hạn cho tài khoản")
+  );
+}
+
+function uploadFailureStatus(err) {
+  const message = err?.message || String(err);
+  return isMinioQuotaUploadError(message) ? t("uploadTooLarge") : message;
+}
+
+function getUploadRejectReason(file) {
+  if (!file) return t("uploadTooLarge");
+  const size = Number(file.size || 0);
+  if (size > state.maxUploadBytes) return t("uploadTooLarge");
+  if (usesAccountMinioQuota(file)) {
+    const limit = Number(state.minioQuotaLimitBytes || 0);
+    const used = Number(state.minioQuotaUsedBytes || 0);
+    if (limit > 0 && used + size > limit) return t("uploadTooLarge");
+  }
+  return null;
+}
+
+function recordUploadRejected(file, reason = t("uploadTooLarge")) {
+  const id = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  createTransfer("upload", file.name, id);
+  updateTransfer(id, {
+    status: reason,
+    loaded: 0,
+    total: file.size,
+    speed: 0,
+    cancelable: false,
+    error: true,
+  });
+  return id;
+}
+
 function canUploadFile(file) {
-  if (!file) return false;
-  if (file.size <= state.maxUploadBytes) return true;
-  toast(`${t("uploadTooLarge")}: ${file.name} (${formatBytes(file.size)} > ${formatBytes(state.maxUploadBytes)})`);
-  return false;
+  return !getUploadRejectReason(file);
 }
 
 async function restoreUploadTransfers() {
@@ -1173,18 +1260,25 @@ async function processUploadQueue() {
           await deleteUploadRecord(record.id);
           continue;
         }
-        record.status = "queued";
-        record.createdAt = Date.now();
-        record.retryAfter = Date.now() + UPLOAD_RETRY_DELAY_MS;
-        delete record.jobId;
-        await putUploadRecord(record);
+        const quotaRejected = isMinioQuotaUploadError(err?.message || String(err));
+        if (quotaRejected) {
+          await deleteUploadRecord(record.id);
+        } else {
+          record.status = "queued";
+          record.createdAt = Date.now();
+          record.retryAfter = Date.now() + UPLOAD_RETRY_DELAY_MS;
+          delete record.jobId;
+          await putUploadRecord(record);
+        }
         updateTransfer(record.id, {
-          status: err.message || String(err),
+          status: uploadFailureStatus(err),
           error: true,
           speed: 0,
-          cancelable: true,
+          cancelable: false,
         });
-        toast(`${t("uploadFailed")}: ${record.fileName}`);
+        if (!quotaRejected) {
+          toast(`${t("uploadFailed")}: ${record.fileName}`);
+        }
       }
     }
   } finally {
@@ -1594,6 +1688,8 @@ function applyAppConfig(data) {
       hasTelegramBotToken: Boolean(data.hasTelegramBotToken),
       isPrimaryAdmin: Boolean(data.isPrimaryAdmin),
     };
+    loadMusicLibraryFromStorage();
+    renderMusicLibraryNav();
   }
   renderSettingsSelf();
   syncAdminOnlyNavVisibility();
@@ -1658,10 +1754,11 @@ function applyLanguage() {
   if (state.view === "accounts" && accountIsAdmin()) {
     void loadAdminAccountsView().catch(showError);
   }
+  renderMusicLibraryNav();
 }
 
 function setView(view, opts = {}) {
-  if (!["drive", "images", "trash", "queue", "settings", "accounts", "admin"].includes(view)) {
+  if (!["drive", "images", "music", "trash", "queue", "settings", "accounts", "admin"].includes(view)) {
     view = "drive";
   }
   if (!accountIsAdmin() && isAdminOnlyView(view)) {
@@ -1669,7 +1766,7 @@ function setView(view, opts = {}) {
   }
   state.view = view;
   $$(".nav-item").forEach((btn) => btn.classList.toggle("active", btn.dataset.view === view));
-  ["drive", "images", "trash", "queue", "settings", "accounts", "admin"].forEach((name) => {
+  ["drive", "images", "music", "trash", "queue", "settings", "accounts", "admin"].forEach((name) => {
     $(`#${name}View`)?.classList.toggle("hidden", name !== view);
   });
   if (!isFileBrowserView(view)) {
@@ -1681,6 +1778,7 @@ function setView(view, opts = {}) {
   }
   if (opts.load !== false) {
     if (view === "images") void loadImages().catch(showError);
+    if (view === "music") void loadMusic().catch(showError);
     if (view === "trash") void loadTrash();
     if (view === "queue") void loadQueue();
     if (view === "settings") void loadSettingsView().catch(showError);
@@ -1733,7 +1831,7 @@ function restoreNavigationState() {
   const saved = parseStoredJson(NAV_STORAGE_KEY) || {};
   const fromHash = parseHashNavigation();
   const source = { ...saved, ...(fromHash || {}) };
-  if (["drive", "images", "trash", "queue", "settings", "accounts", "admin"].includes(source.view)) {
+  if (["drive", "images", "music", "trash", "queue", "settings", "accounts", "admin"].includes(source.view)) {
     state.view = source.view;
   }
   if (source.folderId) {
@@ -1927,6 +2025,224 @@ function renderFolders(folders) {
   syncSelectionBar();
 }
 
+function musicLibraryStorageKey() {
+  const accountId = state.accountProfile?.id || "default";
+  return `${MUSIC_LIBRARY_STORAGE_PREFIX}:${String(accountId)}`;
+}
+
+function loadMusicLibraryFromStorage() {
+  const raw = parseStoredJson(musicLibraryStorageKey());
+  state.musicPlaylists = Array.isArray(raw?.playlists) ? raw.playlists : [];
+  state.musicQueue = Array.isArray(raw?.queue) ? raw.queue.map(String) : [];
+}
+
+function persistMusicLibrary() {
+  localStorage.setItem(
+    musicLibraryStorageKey(),
+    JSON.stringify({
+      playlists: state.musicPlaylists,
+      queue: state.musicQueue,
+    }),
+  );
+}
+
+function getMusicFileById(fileId) {
+  return state.musicFiles.find((file) => file.id === fileId) || null;
+}
+
+function filesForMusicLibrarySource() {
+  if (state.musicLibrarySource === "queue") {
+    return state.musicQueue.map((id) => getMusicFileById(id)).filter(Boolean);
+  }
+  if (state.musicLibrarySource !== "all") {
+    const playlist = state.musicPlaylists.find((entry) => entry.id === state.musicLibrarySource);
+    if (!playlist) return state.musicFiles;
+    return playlist.fileIds.map((id) => getMusicFileById(id)).filter(Boolean);
+  }
+  return state.musicFiles;
+}
+
+function pruneMusicLibraryTracks(availableIds) {
+  const idSet = new Set(availableIds);
+  let changed = false;
+  const nextQueue = state.musicQueue.filter((id) => idSet.has(id));
+  if (nextQueue.length !== state.musicQueue.length) {
+    changed = true;
+    state.musicQueue = nextQueue;
+  }
+  state.musicPlaylists = state.musicPlaylists.map((playlist) => {
+    const fileIds = playlist.fileIds.filter((id) => idSet.has(id));
+    if (fileIds.length !== playlist.fileIds.length) changed = true;
+    return fileIds.length === playlist.fileIds.length ? playlist : { ...playlist, fileIds };
+  });
+  if (changed) persistMusicLibrary();
+}
+
+function renderMusicLibraryNav() {
+  const nav = $("#musicLibraryNav");
+  if (!nav) return;
+  nav.innerHTML = "";
+  const appendTab = (source, label, count) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `music-library-tab${source === state.musicLibrarySource ? " active" : ""}`;
+    button.dataset.musicSource = source;
+    button.innerHTML = `<span>${escapeHtml(label)}</span><small>${count}</small>`;
+    nav.appendChild(button);
+  };
+  appendTab("all", t("musicAllTracks"), state.musicFiles.length);
+  appendTab("queue", t("musicQueue"), state.musicQueue.length);
+  state.musicPlaylists.forEach((playlist) => {
+    appendTab(playlist.id, playlist.name, playlist.fileIds.length);
+  });
+  syncMusicQueueActions();
+}
+
+function syncMusicQueueActions() {
+  const button = $("#musicClearQueueButton");
+  if (!button) return;
+  button.classList.toggle("hidden", !(state.musicLibrarySource === "queue" && state.musicQueue.length > 0));
+}
+
+function setMusicLibrarySource(source) {
+  if (!source || source === state.musicLibrarySource) return;
+  state.musicLibrarySource = source;
+  renderMusicList(filesForMusicLibrarySource());
+  renderMusicLibraryNav();
+}
+
+function createMusicPlaylist(name) {
+  const playlist = {
+    id: `pl-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
+    name,
+    fileIds: [],
+    createdAt: Date.now(),
+  };
+  state.musicPlaylists.push(playlist);
+  persistMusicLibrary();
+  renderMusicLibraryNav();
+  return playlist;
+}
+
+async function createMusicPlaylistWithPrompt() {
+  const name = await openTextModal({
+    title: t("musicCreatePlaylist"),
+    label: t("musicPlaylistNamePrompt"),
+  });
+  if (!name?.trim()) return null;
+  return createMusicPlaylist(name.trim());
+}
+
+function addTrackToMusicPlaylist(playlistId, fileId) {
+  const playlist = state.musicPlaylists.find((entry) => entry.id === playlistId);
+  if (!playlist || playlist.fileIds.includes(fileId)) return false;
+  playlist.fileIds.push(fileId);
+  persistMusicLibrary();
+  renderMusicLibraryNav();
+  if (state.musicLibrarySource === playlistId) {
+    renderMusicList(filesForMusicLibrarySource());
+  }
+  return true;
+}
+
+function enqueueMusicTracks(fileIds) {
+  let added = 0;
+  fileIds.forEach((fileId) => {
+    if (!state.musicQueue.includes(fileId)) {
+      state.musicQueue.push(fileId);
+      added += 1;
+    }
+  });
+  if (!added) return;
+  persistMusicLibrary();
+  renderMusicLibraryNav();
+  if (state.musicLibrarySource === "queue") {
+    renderMusicList(filesForMusicLibrarySource());
+  }
+  toast(t("musicAddedToQueue"));
+}
+
+function removeFromMusicQueue(fileId) {
+  const next = state.musicQueue.filter((id) => id !== fileId);
+  if (next.length === state.musicQueue.length) return;
+  state.musicQueue = next;
+  persistMusicLibrary();
+  renderMusicLibraryNav();
+  if (state.musicLibrarySource === "queue") {
+    renderMusicList(filesForMusicLibrarySource());
+  }
+}
+
+function clearMusicQueue() {
+  if (!state.musicQueue.length) return;
+  state.musicQueue = [];
+  persistMusicLibrary();
+  renderMusicLibraryNav();
+  if (state.musicLibrarySource === "queue") {
+    renderMusicList([]);
+  }
+}
+
+function openAddToPlaylistPicker(file) {
+  const x = Number(state.lastContextMenuX) || window.innerWidth / 2;
+  const y = Number(state.lastContextMenuY) || 120;
+  const items = state.musicPlaylists.map((playlist) => ({
+    label: playlist.name,
+    handler: () => {
+      if (addTrackToMusicPlaylist(playlist.id, file.id)) {
+        toast(t("musicAddedToPlaylist"));
+      }
+    },
+  }));
+  if (items.length) items.push({ separator: true });
+  items.push({
+    label: t("musicCreatePlaylist"),
+    handler: () => {
+      void createMusicPlaylistWithPrompt().then((playlist) => {
+        if (!playlist) return;
+        if (addTrackToMusicPlaylist(playlist.id, file.id)) {
+          toast(t("musicAddedToPlaylist"));
+        }
+      });
+    },
+  });
+  showContextMenu(x, y + 28, items);
+}
+
+function musicContextMenuItems(item) {
+  const items = [
+    { label: t("open"), handler: () => openFilePreview(item) },
+    { label: t("musicAddToQueue"), handler: () => enqueueMusicTracks([item.id]) },
+    { label: t("musicAddToPlaylist"), handler: () => openAddToPlaylistPicker(item) },
+    { separator: true },
+    { label: t("download"), handler: () => downloadFile(item) },
+    { label: t("share"), handler: () => createShare(item.id) },
+    { label: t("tags"), handler: () => editTags(item) },
+    { label: t("rename"), handler: () => renameFile(item) },
+    { label: t("move"), handler: () => moveFile(item) },
+    { label: t("info"), handler: () => showItemInfo("file", item) },
+  ];
+  if (state.musicLibrarySource === "queue") {
+    items.push({ separator: true });
+    items.push({
+      label: t("musicRemoveFromQueue"),
+      variant: "danger",
+      handler: () => removeFromMusicQueue(item.id),
+    });
+  }
+  items.push({ separator: true });
+  items.push({
+    label: t("delete"),
+    variant: "danger",
+    handler: async () => {
+      await api(`/files/${item.id}`, { method: "DELETE" });
+      toast(t("deleted"));
+      await Promise.all([refreshAfterFilePatch(), loadQuota()]);
+    },
+  });
+  return items;
+}
+
 function itemContextMenuItems(type, item) {
   if (type === "folder") {
     return [
@@ -1943,6 +2259,9 @@ function itemContextMenuItems(type, item) {
         handler: () => deleteFolder(item.id, item.name),
       },
     ];
+  }
+  if (state.view === "music" && item.mimeType?.startsWith("audio/")) {
+    return musicContextMenuItems(item);
   }
   return [
     { label: t("open"), handler: () => openFilePreview(item) },
@@ -1972,6 +2291,7 @@ function fileIcon(file) {
   if (file.mimeType?.startsWith("image/")) return "◩";
   if (file.mimeType === "application/pdf") return "PDF";
   if (file.mimeType?.startsWith("video/")) return "▶";
+  if (file.mimeType?.startsWith("audio/")) return "♫";
   return "◆";
 }
 
@@ -2170,7 +2490,7 @@ function syncSelectionModeUi() {
     "drive-selection-mode",
     Boolean(state.selectionMode && !isDesktopFinePointer() && isFileBrowserView()),
   );
-  for (const toggleBtn of [$("#selectModeToggle"), $("#imagesSelectModeToggle")]) {
+  for (const toggleBtn of [$("#selectModeToggle"), $("#imagesSelectModeToggle"), $("#musicSelectModeToggle")]) {
     if (!toggleBtn || isDesktopFinePointer()) continue;
     toggleBtn.textContent = state.selectionMode ? t("selectModeDone") : t("selectMode");
     toggleBtn.classList.toggle("active", state.selectionMode);
@@ -2180,7 +2500,7 @@ function syncSelectionModeUi() {
 
 function syncTouchChrome() {
   const show = Boolean(isFileBrowserView() && !isDesktopFinePointer());
-  for (const toggleBtn of [$("#selectModeToggle"), $("#imagesSelectModeToggle")]) {
+  for (const toggleBtn of [$("#selectModeToggle"), $("#imagesSelectModeToggle"), $("#musicSelectModeToggle")]) {
     if (!toggleBtn) continue;
     toggleBtn.classList.toggle("hidden", !show);
   }
@@ -2212,6 +2532,7 @@ function syncSelectionBar() {
   for (const [barId, countId] of [
     ["selectionBar", "selectionCount"],
     ["imagesSelectionBar", "imagesSelectionCount"],
+    ["musicSelectionBar", "musicSelectionCount"],
   ]) {
     const bar = $(`#${barId}`);
     if (!bar) continue;
@@ -2403,6 +2724,8 @@ function attachContextMenu(row, menuButton, items) {
 }
 
 function showContextMenu(x, y, items) {
+  state.lastContextMenuX = x;
+  state.lastContextMenuY = y;
   const menu = $("#contextMenu");
   menu.innerHTML = "";
   items.forEach((item) => {
@@ -3387,6 +3710,8 @@ async function loadQuota() {
     quota.accountMinioLimitBytes !== undefined && quota.accountMinioLimitBytes !== null
       ? Number(quota.accountMinioLimitBytes)
       : Number(quota.minioLimitBytes || 0);
+  state.minioQuotaUsedBytes = minioBytes;
+  state.minioQuotaLimitBytes = accountLimit;
   const detailEl = $("#minioQuotaDetail");
   const barEl = $("#minioQuotaBar");
   if (accountLimit <= 0) {
@@ -3413,6 +3738,147 @@ async function loadImages() {
   );
   renderFileList("#imagesList", result.items || [], "images");
   persistNavigationState();
+}
+
+async function loadMusic() {
+  const result = await api(
+    "/files/search?mimePrefix=audio%2F&limit=200&sortBy=createdAt&sortOrder=desc",
+  );
+  state.musicFiles = result.items || [];
+  pruneMusicLibraryTracks(state.musicFiles.map((file) => file.id));
+  renderMusicLibraryNav();
+  renderMusicList(filesForMusicLibrarySource());
+  persistNavigationState();
+}
+
+function syncMusicRowsPlaying() {
+  $$("#musicList .music-row").forEach((row) => {
+    row.classList.toggle("playing", row.dataset.fileId === state.musicPlayingId);
+  });
+}
+
+function syncMusicPlayPauseButton() {
+  const button = $("#musicPlayPauseButton");
+  const audio = $("#musicPlayerAudio");
+  if (!button || !audio) return;
+  button.textContent = audio.paused ? "▶" : "⏸";
+}
+
+async function playMusicTrack(file) {
+  if (!file) return;
+  state.musicPlayingId = file.id;
+  state.previewIndex = state.visibleFiles.findIndex((item) => item.id === file.id);
+  const audio = $("#musicPlayerAudio");
+  const player = $("#musicPlayer");
+  $("#musicNowPlayingTitle").textContent = file.name;
+  const uploadedAt = formatUploadedAt(file.createdAt);
+  $("#musicNowPlayingMeta").textContent = [uploadedAt, file.mimeType || "", formatBytes(file.size)]
+    .filter(Boolean)
+    .join(" · ");
+  player.classList.remove("hidden");
+  audio.onended = () => playAdjacentMusic(1);
+  audio.onplay = () => syncMusicPlayPauseButton();
+  audio.onpause = () => syncMusicPlayPauseButton();
+  audio.onerror = async () => {
+    try {
+      audio.src = await objectUrlWithAuth(fileViewUrl(file), { cache: true });
+      void audio.play().catch(() => undefined);
+    } catch (err) {
+      showError(err);
+    }
+  };
+  audio.src = fileViewUrl(file);
+  syncMusicRowsPlaying();
+  syncMusicPlayPauseButton();
+  void audio.play().catch(() => undefined);
+}
+
+function playAdjacentMusic(delta) {
+  if (!state.visibleFiles.length) return;
+  const current = state.visibleFiles.findIndex((file) => file.id === state.musicPlayingId);
+  const nextIndex = current < 0 ? (delta > 0 ? 0 : state.visibleFiles.length - 1) : current + delta;
+  if (nextIndex < 0 || nextIndex >= state.visibleFiles.length) return;
+  void playMusicTrack(state.visibleFiles[nextIndex]);
+}
+
+function renderMusicList(files) {
+  state.visibleFiles = files;
+  pruneSelectedFiles(files);
+  const list = $("#musicList");
+  const hint = $("#musicEmptyHint");
+  list.innerHTML = "";
+  if (!files.length) {
+    if (hint) {
+      hint.classList.remove("hidden");
+      if (state.musicLibrarySource === "queue") {
+        hint.textContent = t("musicQueueEmpty");
+      } else if (state.musicLibrarySource !== "all") {
+        hint.textContent = t("musicPlaylistEmpty");
+      } else {
+        hint.textContent = "";
+        hint.classList.add("hidden");
+        list.appendChild(emptyNode());
+      }
+    } else {
+      list.appendChild(emptyNode());
+    }
+    syncSelectionBar();
+    syncMusicRowsPlaying();
+    return;
+  }
+  if (hint) {
+    hint.textContent = "";
+    hint.classList.add("hidden");
+  }
+  files.forEach((file) => {
+    const row = document.createElement("article");
+    row.className = "file-row music-row";
+    row.dataset.fileId = file.id;
+    row.classList.toggle("selected", state.selectedFileIds.has(file.id));
+    row.classList.toggle("playing", file.id === state.musicPlayingId);
+    row.draggable = true;
+    setInternalDrag(row, { type: "file", id: file.id, name: file.name });
+    row.addEventListener("click", (event) => {
+      if (event.target.closest(".row-actions")) return;
+      if (event.target.closest(".music-play-button")) {
+        void playMusicTrack(file).catch(showError);
+        return;
+      }
+      if (touchBulkSelectActive()) {
+        toggleTouchItemSelection("file", file.id);
+        return;
+      }
+      if (event.shiftKey || event.ctrlKey || event.metaKey) {
+        toggleFileSelection(file.id, event);
+        return;
+      }
+      void playMusicTrack(file).catch(showError);
+    });
+    row.addEventListener("dblclick", (event) => {
+      if (event.target.closest(".row-actions")) return;
+      event.preventDefault();
+      event.stopPropagation();
+      void openFilePreview(file).catch(showError);
+    });
+    const uploadedAt = formatUploadedAt(file.createdAt);
+    const cardMeta = [formatBytes(file.size), uploadedAt].filter(Boolean).join(" · ");
+    const displayName = compactFileNameForMobile(file.name);
+    row.innerHTML = `
+      <div class="file-main music-track-body">
+        <button type="button" class="music-play-button" aria-label="${escapeHtml(t("open"))}">▶</button>
+        <div class="file-title music-track-text">
+          <div class="file-name" title="${escapeHtml(file.name)}">${escapeHtml(displayName)}</div>
+          <div class="file-card-meta">${escapeHtml(cardMeta)}</div>
+        </div>
+      </div>
+      <div class="row-actions"><button class="small-action" type="button">⋮</button></div>
+    `;
+    const menuButton = row.querySelector(".row-actions .small-action");
+    attachContextMenu(row, menuButton, () => contextMenuItemsForItem("file", file));
+    list.appendChild(row);
+  });
+  syncSelectionBar();
+  syncMusicRowsPlaying();
 }
 
 function syncFolderActions() {
@@ -3740,7 +4206,8 @@ async function uploadWithProgress(path, form, file, transferId = createTransfer(
           .then(resolve, reject);
         return;
       }
-      updateTransfer(transferId, { status: `HTTP ${xhr.status}`, error: true, speed: 0, cancelable: true });
+      const failureMessage = uploadFailureStatus(new Error(xhr.responseText || xhr.statusText));
+      updateTransfer(transferId, { status: failureMessage, error: true, speed: 0, cancelable: false });
       reject(new Error(`${xhr.status}: ${xhr.responseText || xhr.statusText}`));
     };
     xhr.onerror = () => {
@@ -3885,10 +4352,12 @@ async function uploadFolderEntries(rootName, entries) {
   const validEntries = [];
   let skipped = 0;
   for (const entry of filteredEntries) {
-    if (canUploadFile(entry.file)) {
-      validEntries.push(entry);
-    } else {
+    const rejectReason = getUploadRejectReason(entry.file);
+    if (rejectReason) {
+      recordUploadRejected(entry.file, rejectReason);
       skipped++;
+    } else {
+      validEntries.push(entry);
     }
   }
 
@@ -4277,6 +4746,10 @@ async function refreshAfterFilePatch() {
     await loadImages();
     return;
   }
+  if (state.view === "music") {
+    await loadMusic();
+    return;
+  }
   await loadDrive();
 }
 
@@ -4516,7 +4989,7 @@ function wireEvents() {
   $("#transferClearButton").addEventListener("click", clearCompletedTransfers);
   $("#transferCollapseButton").addEventListener("click", toggleTransfersCollapsed);
   $("#viewToggleButton").addEventListener("click", toggleFileView);
-  for (const toggleId of ["selectModeToggle", "imagesSelectModeToggle"]) {
+  for (const toggleId of ["selectModeToggle", "imagesSelectModeToggle", "musicSelectModeToggle"]) {
     $(`#${toggleId}`)?.addEventListener("click", (event) => {
       event.stopPropagation();
       if (state.selectionMode) {
@@ -4528,13 +5001,13 @@ function wireEvents() {
       }
     });
   }
-  for (const moveId of ["selectionMoveButton", "imagesSelectionMoveButton"]) {
+  for (const moveId of ["selectionMoveButton", "imagesSelectionMoveButton", "musicSelectionMoveButton"]) {
     $(`#${moveId}`)?.addEventListener("click", (event) => {
       event.stopPropagation();
       void moveSelectedFiles().catch(showError);
     });
   }
-  for (const deleteId of ["selectionDeleteButton", "imagesSelectionDeleteButton"]) {
+  for (const deleteId of ["selectionDeleteButton", "imagesSelectionDeleteButton", "musicSelectionDeleteButton"]) {
     $(`#${deleteId}`)?.addEventListener("click", (event) => {
       event.stopPropagation();
       void deleteSelectedFiles().catch(showError);
@@ -4552,6 +5025,30 @@ function wireEvents() {
   });
   $("#refreshTrashButton").addEventListener("click", () => void loadTrash().catch(showError));
   $("#refreshImagesButton").addEventListener("click", () => void loadImages().catch(showError));
+  $("#refreshMusicButton").addEventListener("click", () => void loadMusic().catch(showError));
+  $("#musicCreatePlaylistButton")?.addEventListener("click", () => {
+    void createMusicPlaylistWithPrompt().then((playlist) => {
+      if (playlist) setMusicLibrarySource(playlist.id);
+    });
+  });
+  $("#musicClearQueueButton")?.addEventListener("click", () => clearMusicQueue());
+  $("#musicLibraryNav")?.addEventListener("click", (event) => {
+    const tab = event.target.closest("[data-music-source]");
+    if (!tab) return;
+    setMusicLibrarySource(tab.dataset.musicSource);
+  });
+  $("#musicPrevButton").addEventListener("click", () => playAdjacentMusic(-1));
+  $("#musicNextButton").addEventListener("click", () => playAdjacentMusic(1));
+  $("#musicPlayPauseButton").addEventListener("click", () => {
+    const audio = $("#musicPlayerAudio");
+    if (!audio) return;
+    if (audio.paused) {
+      void audio.play().catch(showError);
+    } else {
+      audio.pause();
+    }
+    syncMusicPlayPauseButton();
+  });
   $("#emptyTrashButton").addEventListener("click", () => void emptyTrash().catch(showError));
   $("#uploadButton").addEventListener("click", (event) => {
     event.stopPropagation();
@@ -4741,6 +5238,8 @@ async function init() {
     void processUploadQueue().catch(showError);
     if (state.view === "images") {
       await Promise.all([loadQuota(), loadImages()]);
+    } else if (state.view === "music") {
+      await Promise.all([loadQuota(), loadMusic()]);
     } else {
       await Promise.all([loadQuota(), loadDrive()]);
     }

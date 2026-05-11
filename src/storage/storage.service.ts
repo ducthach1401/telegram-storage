@@ -27,6 +27,7 @@ import {
   ApiExceptionMessage,
   StorageExceptionMessage,
 } from '../common/api-messages';
+import { repairUtf8FilenameMojibake } from '../common/multipart-filename';
 import { EnvKey } from '../common/env-keys';
 import {
   CacheControlValue,
@@ -1884,6 +1885,7 @@ export class StorageService implements OnModuleInit {
   private decorateFilesForClient(files: StoredFile[], telegramStorageChatId: string): StoredFile[] {
     return files.map((file) => {
       Object.assign(file, {
+        name: repairUtf8FilenameMojibake(file.name),
         tags: StorageService.tagsToNames(file),
         canDirectDownload:
           !!file.s3ObjectKey ||

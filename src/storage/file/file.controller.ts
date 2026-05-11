@@ -74,6 +74,7 @@ import { UploadJobQueuedDto } from '../domain/dto/upload-job-queued.dto';
 import { UploadJobStatusDto } from '../domain/dto/upload-job-status.dto';
 import { Folder } from '../domain/entities/folder.entity';
 import { StoredFile } from '../domain/entities/stored-file.entity';
+import { repairUtf8FilenameMojibake } from '../../common/multipart-filename';
 import { accountLimitedFileInterceptor } from '../interceptors/account-limited-file.interceptor';
 import {
   BullMqJobState,
@@ -630,7 +631,7 @@ export class FileController {
     const f = await this.storage.getFile(this.tenant(account), id);
     return {
       id: f.id,
-      name: f.name,
+      name: repairUtf8FilenameMojibake(f.name),
       mimeType: f.mimeType,
       size: f.size,
       folderId: f.folderId,
@@ -716,7 +717,7 @@ export class FileController {
     return {
       id: f.id,
       folderId: f.folderId,
-      name: f.name,
+      name: repairUtf8FilenameMojibake(f.name),
       mimeType: f.mimeType,
       size: f.size,
       telegramFileId: f.telegramFileId,
@@ -746,7 +747,9 @@ export class FileController {
       ...FileController.toSummary(f, telegramMaxBytes, telegramStorageChatId),
       deletedAt,
       deletedOriginalFolderId: f.deletedOriginalFolderId,
-      deletedOriginalName: f.deletedOriginalName,
+      deletedOriginalName: f.deletedOriginalName
+        ? repairUtf8FilenameMojibake(f.deletedOriginalName)
+        : f.deletedOriginalName,
     };
   }
 

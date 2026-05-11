@@ -1,4 +1,4 @@
-const CACHE_NAME = "telegram-drive-shell-v20";
+const CACHE_NAME = "telegram-drive-shell-v22";
 const APP_SHELL = [
   "/",
   "/index.html",

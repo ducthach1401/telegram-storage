@@ -9,6 +9,7 @@ import {
 } from '@nestjs/common';
 import multer from 'multer';
 import { Observable } from 'rxjs';
+import { repairUtf8FilenameMojibake } from '../../common/multipart-filename';
 import { multerMaxFileBytesForAccount } from '../../common/upload-limit';
 import { asyncUploadDiskStorage } from '../multer-async-disk.storage';
 
@@ -41,6 +42,9 @@ export function accountLimitedFileInterceptor(fieldName: string): Type<NestInter
             }
             subscriber.error(err);
             return;
+          }
+          if (req.file?.originalname) {
+            req.file.originalname = repairUtf8FilenameMojibake(req.file.originalname);
           }
           next.handle().subscribe(subscriber);
         });

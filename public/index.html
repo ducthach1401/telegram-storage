@@ -41,6 +41,9 @@
           <button class="nav-item" data-view="images">
             <span>◻</span><span data-i18n="images">Ảnh</span>
           </button>
+          <button class="nav-item" data-view="music">
+            <span>♫</span><span data-i18n="music">Âm nhạc</span>
+          </button>
           <button class="nav-item" data-view="trash">
             <span>♻</span><span data-i18n="trash">Thùng rác</span>
           </button>
@@ -159,6 +162,54 @@
             </div>
           </div>
           <div class="file-list grid-view images-library" id="imagesList"></div>
+        </section>
+
+        <section class="panel hidden music-panel" id="musicView">
+          <div class="panel-head">
+            <div>
+              <h2 data-i18n="music">Âm nhạc</h2>
+              <p data-i18n="musicHint">Nghe các file audio đã tải lên, mới nhất trước.</p>
+              <div class="selection-bar hidden" id="musicSelectionBar">
+                <span id="musicSelectionCount">0 mục đã chọn</span>
+                <div class="selection-actions">
+                  <button type="button" class="ghost compact" id="musicSelectionMoveButton" data-i18n="moveSelected">
+                    Di chuyển
+                  </button>
+                  <button type="button" class="ghost compact danger-text" id="musicSelectionDeleteButton" data-i18n="deleteSelected">
+                    Xóa
+                  </button>
+                </div>
+              </div>
+            </div>
+            <div class="panel-actions">
+              <button class="ghost hidden" type="button" id="musicSelectModeToggle" aria-pressed="false">Chọn nhiều</button>
+              <button class="ghost" id="musicCreatePlaylistButton" type="button" data-i18n="musicCreatePlaylist">Tạo playlist</button>
+              <button class="ghost" id="refreshMusicButton" data-i18n="refresh">Làm mới</button>
+            </div>
+          </div>
+          <div class="music-body">
+            <aside class="music-sidebar">
+              <strong class="music-sidebar-title" data-i18n="musicPlaylists">Playlist</strong>
+              <nav class="music-library-nav" id="musicLibraryNav" aria-label="Music library"></nav>
+              <button class="ghost compact danger-text music-clear-queue hidden" id="musicClearQueueButton" type="button" data-i18n="musicClearQueue">Xóa danh sách phát</button>
+            </aside>
+            <div class="music-main">
+              <p class="music-empty-hint hidden muted" id="musicEmptyHint"></p>
+              <div class="music-list file-list list-view" id="musicList"></div>
+            </div>
+          </div>
+          <div class="music-player hidden" id="musicPlayer">
+            <div class="music-player-controls">
+              <button type="button" class="ghost music-nav-button" id="musicPrevButton" aria-label="Previous">‹</button>
+              <button type="button" class="primary-action compact music-play-button" id="musicPlayPauseButton" aria-label="Play">▶</button>
+              <button type="button" class="ghost music-nav-button" id="musicNextButton" aria-label="Next">›</button>
+            </div>
+            <div class="music-player-meta">
+              <strong id="musicNowPlayingTitle">--</strong>
+              <span id="musicNowPlayingMeta" class="muted"></span>
+            </div>
+            <audio id="musicPlayerAudio" controls preload="metadata"></audio>
+          </div>
         </section>
 
         <section class="panel hidden" id="trashView">
