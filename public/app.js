@@ -3285,6 +3285,44 @@ function findDriveDragFile(fileId) {
   );
 }
 
+function dragFileEntry(file) {
+  const live = findDriveDragFile(file.id);
+  return {
+    type: "file",
+    id: file.id,
+    name: file.name,
+    folderId: live?.folderId ?? file.folderId ?? state.folderId,
+  };
+}
+
+function dragFolderEntry(folder) {
+  const live = state.driveFolders.find((entry) => entry.id === folder.id);
+  return {
+    type: "folder",
+    id: folder.id,
+    name: folder.name,
+    parentId: live?.parentId ?? folder.parentId ?? state.folderId,
+  };
+}
+
+function buildInternalDragPayload(item) {
+  const inSelection =
+    item.type === "file"
+      ? state.selectedFileIds.has(item.id)
+      : item.type === "folder"
+        ? state.selectedFolderIds.has(item.id)
+        : false;
+  if (inSelection && selectedItemCount() > 1) {
+    const items = [
+      ...selectedVisibleFiles().map(dragFileEntry),
+      ...selectedVisibleFolders().map(dragFolderEntry),
+    ];
+    if (items.length > 1) {
+      return { type: "selection", items };
+    }
+  }
+  return item.type === "file" ? dragFileEntry(item) : dragFolderEntry(item);
+}
 
 function parseInternalDragPayload(raw) {
   if (!raw) return null;
@@ -3301,14 +3339,7 @@ function setInternalDrag(element, item) {
     event.stopPropagation();
     const transfer = event.dataTransfer;
     if (!transfer) return;
-    const liveFile = item.type === "file" ? findDriveDragFile(item.id) : null;
-    const liveFolder =
-      item.type === "folder" ? state.driveFolders.find((folder) => folder.id === item.id) : null;
-    const payloadItem = {
-      ...item,
-      folderId: liveFile?.folderId ?? item.folderId ?? state.folderId,
-      parentId: liveFolder?.parentId ?? item.parentId ?? state.folderId,
-    };
+    const payloadItem = buildInternalDragPayload(item);
     const payload = JSON.stringify(payloadItem);
     transfer.effectAllowed = "move";
     transfer.setData(INTERNAL_DRAG_TYPE, payload);
@@ -3384,7 +3415,40 @@ function wireDriveDragDropTargets() {
   });
 }
 
+async function moveDraggedSelection(items, targetFolderId) {
+  const fileMoves = items.filter((entry) => entry.type === "file" && entry.folderId !== targetFolderId);
+  const folderMoves = items.filter(
+    (entry) => entry.type === "folder" && entry.id !== targetFolderId && entry.parentId !== targetFolderId,
+  );
+  if (!fileMoves.length && !folderMoves.length) return;
+  await withFolderProcessing(
+    folderMoves.map((entry) => entry.id),
+    () =>
+      Promise.all([
+        ...fileMoves.map((entry) =>
+          api(`/files/${entry.id}?duplicatePolicy=suffix`, {
+            method: "PATCH",
+            body: JSON.stringify({ folderId: targetFolderId }),
+          }),
+        ),
+        ...folderMoves.map((entry) =>
+          api(`/folders/${entry.id}`, {
+            method: "PATCH",
+            body: JSON.stringify({ parentId: targetFolderId }),
+          }),
+        ),
+      ]),
+  );
+  clearFileSelection();
+  toast(t("moved"));
+  await refreshAfterFilePatch();
+}
+
 async function moveDraggedItem(item, targetFolderId) {
+  if (item.type === "selection") {
+    await moveDraggedSelection(item.items || [], targetFolderId);
+    return;
+  }
   if (item.type === "file") {
     if (item.folderId === targetFolderId) return;
     await api(`/files/${item.id}?duplicatePolicy=suffix`, {
