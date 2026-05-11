@@ -469,6 +469,8 @@ export class FileController {
       createdTo: query.createdTo,
       hasThumbnail: query.hasThumbnail,
       tags: query.tags,
+      sortBy: query.sortBy,
+      sortOrder: query.sortOrder,
     });
     return {
       items: items.map((f) =>

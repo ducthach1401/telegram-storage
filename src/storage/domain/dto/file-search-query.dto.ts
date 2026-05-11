@@ -16,6 +16,8 @@ import {
 } from 'class-validator';
 
 export const FILE_SEARCH_MODES = ['substring', 'prefix'] as const;
+export const FILE_SEARCH_SORT_FIELDS = ['name', 'createdAt'] as const;
+export const FILE_SEARCH_SORT_ORDERS = ['asc', 'desc'] as const;
 
 export class FileSearchQueryDto {
   @ApiPropertyOptional({ description: 'Chuỗi tìm trong tên file' })
@@ -113,4 +115,14 @@ export class FileSearchQueryDto {
   @ArrayMaxSize(20)
   @IsString({ each: true })
   tags?: string[];
+
+  @ApiPropertyOptional({ enum: FILE_SEARCH_SORT_FIELDS, default: 'name' })
+  @IsOptional()
+  @IsIn([...FILE_SEARCH_SORT_FIELDS])
+  sortBy?: (typeof FILE_SEARCH_SORT_FIELDS)[number];
+
+  @ApiPropertyOptional({ enum: FILE_SEARCH_SORT_ORDERS, default: 'asc' })
+  @IsOptional()
+  @IsIn([...FILE_SEARCH_SORT_ORDERS])
+  sortOrder?: (typeof FILE_SEARCH_SORT_ORDERS)[number];
 }

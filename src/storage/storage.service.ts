@@ -91,6 +91,8 @@ export interface FileSearchParams {
   createdTo?: string;
   hasThumbnail?: boolean;
   tags?: string[];
+  sortBy?: 'name' | 'createdAt';
+  sortOrder?: 'asc' | 'desc';
 }
 
 export interface StorageQuotaStats {
@@ -695,14 +697,16 @@ export class StorageService implements OnModuleInit {
 
   async searchFiles(t: StorageTenant, params: FileSearchParams): Promise<StoredFile[]> {
     const limit = Math.min(Math.max(params.limit, 1), 200);
+    const sortBy = params.sortBy === 'createdAt' ? 'f.createdAt' : 'f.name';
+    const sortOrder = params.sortOrder === 'desc' ? 'DESC' : 'ASC';
     const qb = this.fileRepo
       .createQueryBuilder('f')
       .innerJoin('f.folder', 'sf_folder')
       .leftJoinAndSelect('f.tags', 'tag')
       .where('f.deletedAt IS NULL')
       .andWhere('sf_folder.accountId = :aid', { aid: t.accountId })
-      .orderBy('f.name', TYPEORM_ORDER_ASC)
-      .addOrderBy('f.id', TYPEORM_ORDER_ASC)
+      .orderBy(sortBy, sortOrder)
+      .addOrderBy('f.id', sortOrder)
       .take(limit);
 
     if (params.q?.trim()) {

@@ -38,6 +38,9 @@
           <button class="nav-item active" data-view="drive">
             <span>▦</span><span data-i18n="drive">Drive</span>
           </button>
+          <button class="nav-item" data-view="images">
+            <span>◻</span><span data-i18n="images">Ảnh</span>
+          </button>
           <button class="nav-item" data-view="trash">
             <span>♻</span><span data-i18n="trash">Thùng rác</span>
           </button>
@@ -131,6 +134,31 @@
           <div class="file-list hidden" id="searchResults"></div>
           <div class="grid" id="folderGrid"></div>
           <div class="file-list" id="fileList"></div>
+        </section>
+
+        <section class="panel hidden" id="imagesView">
+          <div class="panel-head">
+            <div>
+              <h2 data-i18n="images">Ảnh</h2>
+              <p data-i18n="imagesHint">Tất cả ảnh đã tải lên, mới nhất trước.</p>
+              <div class="selection-bar hidden" id="imagesSelectionBar">
+                <span id="imagesSelectionCount">0 mục đã chọn</span>
+                <div class="selection-actions">
+                  <button type="button" class="ghost compact" id="imagesSelectionMoveButton" data-i18n="moveSelected">
+                    Di chuyển
+                  </button>
+                  <button type="button" class="ghost compact danger-text" id="imagesSelectionDeleteButton" data-i18n="deleteSelected">
+                    Xóa
+                  </button>
+                </div>
+              </div>
+            </div>
+            <div class="panel-actions">
+              <button class="ghost hidden" type="button" id="imagesSelectModeToggle" aria-pressed="false">Chọn nhiều</button>
+              <button class="ghost" id="refreshImagesButton" data-i18n="refresh">Làm mới</button>
+            </div>
+          </div>
+          <div class="file-list grid-view images-library" id="imagesList"></div>
         </section>
 
         <section class="panel hidden" id="trashView">

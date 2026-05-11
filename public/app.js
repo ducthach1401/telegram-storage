@@ -80,6 +80,8 @@ const i18n = {
     dropToUpload: "Thả file để upload",
     dropHint: "File/folder sẽ được lưu vào thư mục đang mở",
     drive: "Drive",
+    images: "Ảnh",
+    imagesHint: "Tất cả ảnh đã tải lên, mới nhất trước.",
     search: "Tìm kiếm",
     trash: "Thùng rác",
     queue: "Queue lỗi",
@@ -278,6 +280,8 @@ const i18n = {
     dropToUpload: "Drop files to upload",
     dropHint: "Files/folders will be saved into the current folder",
     drive: "Drive",
+    images: "Images",
+    imagesHint: "All uploaded images, newest first.",
     search: "Search",
     trash: "Trash",
     queue: "Failed queue",
@@ -503,6 +507,10 @@ function accountIsAdmin() {
 
 function isAdminOnlyView(view) {
   return view === "admin" || view === "queue" || view === "accounts";
+}
+
+function isFileBrowserView(view = state.view) {
+  return view === "drive" || view === "images";
 }
 
 function formatBytes(bytes) {
@@ -1195,12 +1203,16 @@ function scheduleUploadQueue(delayMs = 0) {
   }, delayMs);
 }
 
-function toast(message) {
+function toast(message, opts = {}) {
   const el = $("#toast");
   el.textContent = message;
+  el.classList.toggle("toast-error", Boolean(opts.error));
   el.classList.add("show");
   clearTimeout(toast.timer);
-  toast.timer = setTimeout(() => el.classList.remove("show"), 2800);
+  toast.timer = setTimeout(() => {
+    el.classList.remove("show");
+    el.classList.remove("toast-error");
+  }, 2800);
 }
 
 function openTextModal({ title, label, description = "", value = "", required = true }) {
@@ -1649,7 +1661,7 @@ function applyLanguage() {
 }
 
 function setView(view, opts = {}) {
-  if (!["drive", "trash", "queue", "settings", "accounts", "admin"].includes(view)) {
+  if (!["drive", "images", "trash", "queue", "settings", "accounts", "admin"].includes(view)) {
     view = "drive";
   }
   if (!accountIsAdmin() && isAdminOnlyView(view)) {
@@ -1657,10 +1669,10 @@ function setView(view, opts = {}) {
   }
   state.view = view;
   $$(".nav-item").forEach((btn) => btn.classList.toggle("active", btn.dataset.view === view));
-  ["drive", "trash", "queue", "settings", "accounts", "admin"].forEach((name) => {
+  ["drive", "images", "trash", "queue", "settings", "accounts", "admin"].forEach((name) => {
     $(`#${name}View`)?.classList.toggle("hidden", name !== view);
   });
-  if (view !== "drive") {
+  if (!isFileBrowserView(view)) {
     exitSelectionMode();
   }
   syncTouchChrome();
@@ -1668,6 +1680,7 @@ function setView(view, opts = {}) {
     persistNavigationState();
   }
   if (opts.load !== false) {
+    if (view === "images") void loadImages().catch(showError);
     if (view === "trash") void loadTrash();
     if (view === "queue") void loadQueue();
     if (view === "settings") void loadSettingsView().catch(showError);
@@ -1720,7 +1733,7 @@ function restoreNavigationState() {
   const saved = parseStoredJson(NAV_STORAGE_KEY) || {};
   const fromHash = parseHashNavigation();
   const source = { ...saved, ...(fromHash || {}) };
-  if (["drive", "trash", "queue", "settings", "accounts", "admin"].includes(source.view)) {
+  if (["drive", "images", "trash", "queue", "settings", "accounts", "admin"].includes(source.view)) {
     state.view = source.view;
   }
   if (source.folderId) {
@@ -1949,7 +1962,7 @@ function itemContextMenuItems(type, item) {
       handler: async () => {
         await api(`/files/${item.id}`, { method: "DELETE" });
         toast(t("deleted"));
-        await Promise.all([loadDrive(), loadQuota()]);
+        await Promise.all([refreshAfterFilePatch(), loadQuota()]);
       },
     },
   ];
@@ -1994,6 +2007,10 @@ function syncViewToggle() {
 }
 
 function toggleFileView() {
+  if (state.view === "images") {
+    void loadImages().catch(showError);
+    return;
+  }
   state.fileView = state.fileView === "grid" ? "list" : "grid";
   localStorage.setItem(VIEW_STORAGE_KEY, state.fileView);
   syncViewToggle();
@@ -2151,10 +2168,10 @@ function exitSelectionMode() {
 function syncSelectionModeUi() {
   $(".app-shell")?.classList.toggle(
     "drive-selection-mode",
-    Boolean(state.selectionMode && !isDesktopFinePointer() && state.view === "drive"),
+    Boolean(state.selectionMode && !isDesktopFinePointer() && isFileBrowserView()),
   );
-  const toggleBtn = $("#selectModeToggle");
-  if (toggleBtn && !isDesktopFinePointer()) {
+  for (const toggleBtn of [$("#selectModeToggle"), $("#imagesSelectModeToggle")]) {
+    if (!toggleBtn || isDesktopFinePointer()) continue;
     toggleBtn.textContent = state.selectionMode ? t("selectModeDone") : t("selectMode");
     toggleBtn.classList.toggle("active", state.selectionMode);
     toggleBtn.setAttribute("aria-pressed", String(state.selectionMode));
@@ -2162,10 +2179,11 @@ function syncSelectionModeUi() {
 }
 
 function syncTouchChrome() {
-  const toggleBtn = $("#selectModeToggle");
-  if (!toggleBtn) return;
-  const show = Boolean(state.view === "drive" && !isDesktopFinePointer());
-  toggleBtn.classList.toggle("hidden", !show);
+  const show = Boolean(isFileBrowserView() && !isDesktopFinePointer());
+  for (const toggleBtn of [$("#selectModeToggle"), $("#imagesSelectModeToggle")]) {
+    if (!toggleBtn) continue;
+    toggleBtn.classList.toggle("hidden", !show);
+  }
   if (!show && state.selectionMode) {
     state.selectionMode = false;
     clearFileSelection();
@@ -2187,12 +2205,20 @@ function syncSelectedRows() {
 }
 
 function syncSelectionBar() {
-  const bar = $("#selectionBar");
-  if (!bar) return;
   const count = selectedItemCount();
   const touchBulk = touchBulkSelectActive();
-  bar.classList.toggle("hidden", count < (touchBulk ? 1 : 2));
-  $("#selectionCount").textContent = `${count} ${t("selectedItems")}`;
+  const hidden = count < (touchBulk ? 1 : 2);
+  const countText = `${count} ${t("selectedItems")}`;
+  for (const [barId, countId] of [
+    ["selectionBar", "selectionCount"],
+    ["imagesSelectionBar", "imagesSelectionCount"],
+  ]) {
+    const bar = $(`#${barId}`);
+    if (!bar) continue;
+    bar.classList.toggle("hidden", hidden);
+    const countEl = $(`#${countId}`);
+    if (countEl) countEl.textContent = countText;
+  }
 }
 
 function selectedVisibleFolders() {
@@ -2231,15 +2257,19 @@ function renderFileList(target, files, mode = "drive") {
   if (mode === "drive") {
     state.driveFiles = files;
   }
-  if (mode === "trash" || (mode !== "drive" || !state.searchActive)) {
+  if (mode === "images") {
+    state.imagesFiles = files;
+  }
+  if (mode === "trash" || mode === "images" || (mode !== "drive" || !state.searchActive)) {
     state.visibleFiles = files;
   }
-  if (mode !== "trash" && (mode !== "drive" || !state.searchActive)) {
+  if (mode !== "trash" && (mode === "images" || mode !== "drive" || !state.searchActive)) {
     pruneSelectedFiles(files);
   }
   list.innerHTML = "";
-  list.classList.toggle("grid-view", state.fileView === "grid");
-  list.classList.toggle("list-view", state.fileView !== "grid");
+  const forceGrid = mode === "images";
+  list.classList.toggle("grid-view", forceGrid || state.fileView === "grid");
+  list.classList.toggle("list-view", !forceGrid && state.fileView !== "grid");
   if (!files.length) {
     list.appendChild(emptyNode());
     syncSelectionBar();
@@ -3377,6 +3407,14 @@ async function loadDrive() {
   persistNavigationState();
 }
 
+async function loadImages() {
+  const result = await api(
+    "/files/search?mimePrefix=image%2F&limit=200&sortBy=createdAt&sortOrder=desc",
+  );
+  renderFileList("#imagesList", result.items || [], "images");
+  persistNavigationState();
+}
+
 function syncFolderActions() {
   $("#folderMenuButton").title = t("rightClickHint");
 }
@@ -4127,7 +4165,7 @@ async function editTags(file) {
   if (state.searchActive) {
     $("#searchForm").requestSubmit();
   } else {
-    await loadDrive();
+    await refreshAfterFilePatch();
   }
 }
 
@@ -4233,6 +4271,10 @@ async function moveSelectedFiles() {
 async function refreshAfterFilePatch() {
   if (state.searchActive) {
     $("#searchForm").requestSubmit();
+    return;
+  }
+  if (state.view === "images") {
+    await loadImages();
     return;
   }
   await loadDrive();
@@ -4474,24 +4516,30 @@ function wireEvents() {
   $("#transferClearButton").addEventListener("click", clearCompletedTransfers);
   $("#transferCollapseButton").addEventListener("click", toggleTransfersCollapsed);
   $("#viewToggleButton").addEventListener("click", toggleFileView);
-  $("#selectModeToggle").addEventListener("click", (event) => {
-    event.stopPropagation();
-    if (state.selectionMode) {
-      exitSelectionMode();
-    } else {
-      state.selectionMode = true;
-      syncSelectionModeUi();
-      syncSelectionBar();
-    }
-  });
-  $("#selectionMoveButton").addEventListener("click", (event) => {
-    event.stopPropagation();
-    void moveSelectedFiles().catch(showError);
-  });
-  $("#selectionDeleteButton").addEventListener("click", (event) => {
-    event.stopPropagation();
-    void deleteSelectedFiles().catch(showError);
-  });
+  for (const toggleId of ["selectModeToggle", "imagesSelectModeToggle"]) {
+    $(`#${toggleId}`)?.addEventListener("click", (event) => {
+      event.stopPropagation();
+      if (state.selectionMode) {
+        exitSelectionMode();
+      } else {
+        state.selectionMode = true;
+        syncSelectionModeUi();
+        syncSelectionBar();
+      }
+    });
+  }
+  for (const moveId of ["selectionMoveButton", "imagesSelectionMoveButton"]) {
+    $(`#${moveId}`)?.addEventListener("click", (event) => {
+      event.stopPropagation();
+      void moveSelectedFiles().catch(showError);
+    });
+  }
+  for (const deleteId of ["selectionDeleteButton", "imagesSelectionDeleteButton"]) {
+    $(`#${deleteId}`)?.addEventListener("click", (event) => {
+      event.stopPropagation();
+      void deleteSelectedFiles().catch(showError);
+    });
+  }
   window.addEventListener("resize", () => {
     syncTouchChrome();
   });
@@ -4503,6 +4551,7 @@ function wireEvents() {
     applyLanguage();
   });
   $("#refreshTrashButton").addEventListener("click", () => void loadTrash().catch(showError));
+  $("#refreshImagesButton").addEventListener("click", () => void loadImages().catch(showError));
   $("#emptyTrashButton").addEventListener("click", () => void emptyTrash().catch(showError));
   $("#uploadButton").addEventListener("click", (event) => {
     event.stopPropagation();
@@ -4647,7 +4696,7 @@ async function importMysqlDump(file) {
 }
 
 function showError(err) {
-  toast(`${err.message || String(err)} · ${t("authHint")}`);
+  toast(`${err.message || String(err)} · ${t("authHint")}`, { error: true });
 }
 
 function registerServiceWorker() {
@@ -4690,7 +4739,11 @@ async function init() {
     await restoreUploadTransfers();
     restoreActiveTransferSnapshots();
     void processUploadQueue().catch(showError);
-    await Promise.all([loadQuota(), loadDrive()]);
+    if (state.view === "images") {
+      await Promise.all([loadQuota(), loadImages()]);
+    } else {
+      await Promise.all([loadQuota(), loadDrive()]);
+    }
     if (state.searchActive) {
       await runSearch($("#searchForm"));
     }
