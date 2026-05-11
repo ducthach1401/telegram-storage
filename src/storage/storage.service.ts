@@ -797,9 +797,10 @@ export class StorageService implements OnModuleInit {
       }
     }
 
+    file.folder = { id: targetFolderId } as Folder;
     file.folderId = targetFolderId;
     file.name = targetName;
-    return this.fileRepo.save(file);
+    return this.saveFileEntityWithSuffixOnDuplicate(file, targetFolderId, targetName);
   }
 
   async getStorageQuotaStats(t: StorageTenant): Promise<StorageQuotaStats> {
@@ -1027,6 +1028,7 @@ export class StorageService implements OnModuleInit {
       }
     }
 
+    file.folder = { id: targetFolderId } as Folder;
     file.folderId = targetFolderId;
     file.name = targetName;
     file.deletedAt = null;

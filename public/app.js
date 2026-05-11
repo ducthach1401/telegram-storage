@@ -15,6 +15,7 @@ function readAuthCookie() {
 const VIEW_STORAGE_KEY = "tg-drive-file-view";
 const NAV_STORAGE_KEY = "tg-drive-nav-state";
 const ACTIVE_TRANSFER_STORAGE_KEY = "tg-drive-active-transfers";
+let loadDriveRequestId = 0;
 const MUSIC_LIBRARY_STORAGE_PREFIX = "tg-drive-music-library";
 
 /** Khớp PATCH /admin/settings (không gồm queue worker). */
@@ -492,6 +493,9 @@ const state = {
   trashFolderId: ROOT,
   trashPath: [],
   dragDepth: 0,
+  internalDragActive: false,
+  internalDragPayload: null,
+  resolvedFolderId: null,
   loadingFolderId: null,
   authToken: localStorage.getItem(AUTH_STORAGE_KEY) || readAuthCookie(),
   fileView: localStorage.getItem(VIEW_STORAGE_KEY) || "list",
@@ -1777,6 +1781,7 @@ function setView(view, opts = {}) {
     persistNavigationState();
   }
   if (opts.load !== false) {
+    if (view === "drive") void refreshDriveView().catch(showError);
     if (view === "images") void loadImages().catch(showError);
     if (view === "music") void loadMusic().catch(showError);
     if (view === "trash") void loadTrash();
@@ -1892,8 +1897,8 @@ function renderBreadcrumbs() {
     }
     const btn = document.createElement("button");
     btn.className = "crumb";
+    btn.dataset.folderId = crumb.id;
     btn.textContent = index === 0 ? t("root") : crumb.name;
-    makeDropTarget(btn, crumb.id);
     btn.addEventListener("click", () => {
       state.path = state.path.slice(0, index + 1);
       void navigateToFolder(crumb.id);
@@ -1997,10 +2002,14 @@ function renderFolders(folders) {
     btn.dataset.processingLabel = t("processing");
     btn.disabled = state.processingFolderIds.has(folder.id);
     btn.draggable = true;
-    btn.innerHTML = `<img class="folder-icon" src="/folder.png" alt="" /><strong></strong>`;
+    btn.innerHTML = `<img class="folder-icon" src="/folder.png" alt="" draggable="false" /><strong></strong>`;
     btn.querySelector("strong").textContent = folder.name;
-    setInternalDrag(btn, { type: "folder", id: folder.id, name: folder.name });
-    makeDropTarget(btn, folder.id);
+    setInternalDrag(btn, {
+      type: "folder",
+      id: folder.id,
+      name: folder.name,
+      parentId: folder.parentId ?? ROOT,
+    });
     btn.addEventListener("click", (event) => {
       event.preventDefault();
       if (touchBulkSelectActive()) {
@@ -2313,6 +2322,7 @@ async function loadThumbnail(container, file, mode) {
       }
     };
     img.src = fileThumbnailUrl(file);
+    img.draggable = false;
     container.textContent = "";
     container.appendChild(img);
   } catch {
@@ -2603,7 +2613,12 @@ function renderFileList(target, files, mode = "drive") {
     row.dataset.fileId = file.id;
     row.classList.toggle("selected", state.selectedFileIds.has(file.id));
     row.draggable = true;
-    setInternalDrag(row, { type: "file", id: file.id, name: file.name });
+    setInternalDrag(row, {
+      type: "file",
+      id: file.id,
+      name: file.name,
+      folderId: file.folderId ?? state.folderId,
+    });
     row.addEventListener("click", (event) => {
       if (event.target.closest(".row-actions")) return;
       if (touchBulkSelectActive() && mode !== "trash") {
@@ -3223,64 +3238,174 @@ async function openThumbnailPreview(file) {
   body.appendChild(createZoomableImagePreview(img));
 }
 
-function setInternalDrag(element, item) {
-  element.addEventListener("dragstart", (event) => {
-    event.dataTransfer.effectAllowed = "move";
-    event.dataTransfer.setData(INTERNAL_DRAG_TYPE, JSON.stringify(item));
-  });
+function dragTypes(event) {
+  const types = event.dataTransfer?.types;
+  if (!types) return [];
+  return typeof types.includes === "function" ? Array.from(types) : [...types];
 }
 
-function readInternalDrag(event) {
-  const raw = event.dataTransfer?.getData(INTERNAL_DRAG_TYPE);
+function isExternalFileDrag(event) {
+  if (state.internalDragActive) return false;
+  const types = dragTypes(event);
+  if (types.includes(INTERNAL_DRAG_TYPE)) return false;
+  return types.includes("Files");
+}
+
+function isInternalDriveDrag(event) {
+  return state.internalDragActive || dragTypes(event).includes(INTERNAL_DRAG_TYPE);
+}
+
+function accountRootFolderId() {
+  return state.accountProfile?.rootFolderId || (state.folderId === ROOT ? state.resolvedFolderId : null);
+}
+
+function driveFolderKey(value) {
+  const raw = value === undefined || value === null || value === "" ? ROOT : value;
+  if (raw === ROOT) {
+    return String(accountRootFolderId() || ROOT);
+  }
+  return String(raw);
+}
+
+function sameDriveFolder(left, right) {
+  const leftKey = driveFolderKey(left);
+  const rightKey = driveFolderKey(right);
+  return Boolean(leftKey && rightKey && leftKey === rightKey);
+}
+
+function sourceFolderIdForFile(file) {
+  return file?.folderId ?? state.folderId;
+}
+
+function findDriveDragFile(fileId) {
+  return (
+    state.driveFiles.find((file) => file.id === fileId) ||
+    state.visibleFiles.find((file) => file.id === fileId) ||
+    null
+  );
+}
+
+
+function parseInternalDragPayload(raw) {
   if (!raw) return null;
   try {
-    return JSON.parse(raw);
+    const item = JSON.parse(raw);
+    return item?.type ? item : null;
   } catch {
     return null;
   }
 }
 
-function makeDropTarget(element, targetFolderIdOrFn) {
-  element.addEventListener("dragover", (event) => {
-    if (!event.dataTransfer?.types?.includes(INTERNAL_DRAG_TYPE)) return;
+function setInternalDrag(element, item) {
+  element.addEventListener("dragstart", (event) => {
+    event.stopPropagation();
+    const transfer = event.dataTransfer;
+    if (!transfer) return;
+    const liveFile = item.type === "file" ? findDriveDragFile(item.id) : null;
+    const liveFolder =
+      item.type === "folder" ? state.driveFolders.find((folder) => folder.id === item.id) : null;
+    const payloadItem = {
+      ...item,
+      folderId: liveFile?.folderId ?? item.folderId ?? state.folderId,
+      parentId: liveFolder?.parentId ?? item.parentId ?? state.folderId,
+    };
+    const payload = JSON.stringify(payloadItem);
+    transfer.effectAllowed = "move";
+    transfer.setData(INTERNAL_DRAG_TYPE, payload);
+    transfer.setData("text/plain", item.name || item.id || "");
+    state.internalDragPayload = payloadItem;
+    state.internalDragActive = true;
+    state.dragDepth = 0;
+    $("#dropOverlay").classList.add("hidden");
+  });
+  element.addEventListener("dragend", () => {
+    state.internalDragPayload = null;
+    state.internalDragActive = false;
+    state.dragDepth = 0;
+    $("#dropOverlay").classList.add("hidden");
+    clearDriveDragOver();
+  });
+}
+
+function readInternalDrag(event) {
+  if (state.internalDragPayload) return state.internalDragPayload;
+  const transfer = event.dataTransfer;
+  return parseInternalDragPayload(transfer?.getData(INTERNAL_DRAG_TYPE));
+}
+
+function clearDriveDragOver() {
+  $$("#driveView .drag-over").forEach((el) => el.classList.remove("drag-over"));
+}
+
+function resolveDriveDropTarget(event) {
+  const nodes = document.elementsFromPoint(event.clientX, event.clientY);
+  for (const node of nodes) {
+    const card = node.closest?.(".folder-card[data-folder-id]");
+    if (card) return card.dataset.folderId;
+    const crumb = node.closest?.(".crumb[data-folder-id]");
+    if (crumb) return crumb.dataset.folderId;
+  }
+  return null;
+}
+
+function wireDriveDragDropTargets() {
+  const panel = $("#driveView");
+  if (!panel || panel.dataset.dragDropWired) return;
+  panel.dataset.dragDropWired = "1";
+  panel.addEventListener("dragover", (event) => {
+    if (!isInternalDriveDrag(event)) return;
     event.preventDefault();
     event.dataTransfer.dropEffect = "move";
-    element.classList.add("drag-over");
+    clearDriveDragOver();
+    const nodes = document.elementsFromPoint(event.clientX, event.clientY);
+    for (const node of nodes) {
+      const target = node.closest?.(".folder-card[data-folder-id], .crumb[data-folder-id]");
+      if (target) {
+        target.classList.add("drag-over");
+        break;
+      }
+    }
   });
-  element.addEventListener("dragleave", () => {
-    element.classList.remove("drag-over");
+  panel.addEventListener("dragleave", (event) => {
+    const target = event.target.closest(".folder-card[data-folder-id], .crumb[data-folder-id]");
+    if (!target) return;
+    const related = event.relatedTarget;
+    if (related && target.contains(related)) return;
+    target.classList.remove("drag-over");
   });
-  element.addEventListener("drop", (event) => {
+  panel.addEventListener("drop", (event) => {
     const item = readInternalDrag(event);
-    if (!item) return;
+    const targetFolderId = resolveDriveDropTarget(event);
+    if (!item || !targetFolderId) return;
     event.preventDefault();
     event.stopPropagation();
-    element.classList.remove("drag-over");
-    const targetFolderId =
-      typeof targetFolderIdOrFn === "function" ? targetFolderIdOrFn() : targetFolderIdOrFn;
+    clearDriveDragOver();
     void moveDraggedItem(item, targetFolderId).catch(showError);
   });
 }
 
 async function moveDraggedItem(item, targetFolderId) {
   if (item.type === "file") {
+    if (item.folderId === targetFolderId) return;
     await api(`/files/${item.id}?duplicatePolicy=suffix`, {
       method: "PATCH",
       body: JSON.stringify({ folderId: targetFolderId }),
     });
-  } else if (item.type === "folder") {
-    if (item.id === targetFolderId) return;
+    toast(t("moved"));
+    await refreshAfterFilePatch();
+    return;
+  }
+  if (item.type === "folder") {
+    if (item.id === targetFolderId || item.parentId === targetFolderId) return;
     await withFolderProcessing([item.id], () =>
       api(`/folders/${item.id}`, {
         method: "PATCH",
         body: JSON.stringify({ parentId: targetFolderId }),
       }),
     );
-  } else {
-    return;
+    toast(t("moved"));
+    await refreshAfterFilePatch();
   }
-  toast(t("moved"));
-  await loadDrive();
 }
 
 function folderMenuItems() {
@@ -3723,12 +3848,27 @@ async function loadQuota() {
   }
 }
 
+async function refreshDriveView() {
+  if (state.searchActive) {
+    const form = $("#searchForm");
+    if (!form) return loadDrive();
+    return runSearch(form);
+  }
+  return loadDrive();
+}
+
 async function loadDrive() {
+  const requestId = ++loadDriveRequestId;
   renderBreadcrumbs();
   syncFolderActions();
   const data = await api(`/folders/${encodeURIComponent(state.folderId)}/contents?fileLimit=200&folderLimit=200`);
+  if (requestId !== loadDriveRequestId) return;
+  state.resolvedFolderId = data.folderId || null;
   renderFolders(data.folders || []);
   renderFileList("#fileList", data.files || []);
+  if (state.view === "drive") {
+    setDriveSearchActive(false, { persist: false });
+  }
   persistNavigationState();
 }
 
@@ -3978,7 +4118,7 @@ function renderTrashFolders(folders) {
     btn.toggleAttribute("aria-busy", state.processingFolderIds.has(folder.id));
     btn.dataset.processingLabel = t("processing");
     btn.disabled = state.processingFolderIds.has(folder.id);
-    btn.innerHTML = `<img class="folder-icon" src="/folder.png" alt="" /><strong></strong>`;
+    btn.innerHTML = `<img class="folder-icon" src="/folder.png" alt="" draggable="false" /><strong></strong>`;
     btn.querySelector("strong").textContent = folder.name;
     btn.addEventListener("click", () => openTrashFolder(folder));
     attachContextMenu(btn, btn, () => {
@@ -4658,12 +4798,12 @@ async function moveFile(file) {
     title: t("move"),
   });
   if (!folderId) return;
-  const saved = await api(`/files/${file.id}?duplicatePolicy=suffix`, {
+  await api(`/files/${file.id}?duplicatePolicy=suffix`, {
     method: "PATCH",
     body: JSON.stringify({ folderId }),
   });
-  toast(t("saved"));
-  await refreshAfterFilePatch(saved.id);
+  toast(t("moved"));
+  await refreshAfterFilePatch();
 }
 
 async function moveFolder(folder) {
@@ -4714,17 +4854,22 @@ async function moveSelectedFiles() {
   });
   if (!folderId) return;
   const targetFolderId = folderId;
+  const fileMoves = files.filter((file) => !sameDriveFolder(sourceFolderIdForFile(file), targetFolderId));
+  const folderMoves = folders.filter(
+    (folder) => folder.id !== targetFolderId && !sameDriveFolder(folder.parentId ?? ROOT, targetFolderId),
+  );
+  if (!fileMoves.length && !folderMoves.length) return;
   await withFolderProcessing(
-    folders.map((folder) => folder.id),
+    folderMoves.map((folder) => folder.id),
     () =>
       Promise.all([
-        ...files.map((file) =>
+        ...fileMoves.map((file) =>
           api(`/files/${file.id}?duplicatePolicy=suffix`, {
             method: "PATCH",
             body: JSON.stringify({ folderId: targetFolderId }),
           }),
         ),
-        ...folders.map((folder) =>
+        ...folderMoves.map((folder) =>
           api(`/folders/${folder.id}`, {
             method: "PATCH",
             body: JSON.stringify({ parentId: targetFolderId }),
@@ -4750,7 +4895,7 @@ async function refreshAfterFilePatch() {
     await loadMusic();
     return;
   }
-  await loadDrive();
+  await refreshDriveView();
 }
 
 async function showItemInfo(type, item) {
@@ -4926,6 +5071,9 @@ function clearDriveSearch(opts = {}) {
   if (form) form.reset();
   $("#searchResults").innerHTML = "";
   setDriveSearchActive(false, opts);
+  if (state.view === "drive") {
+    void loadDrive().catch(showError);
+  }
 }
 
 async function runSearch(form) {
@@ -4971,7 +5119,7 @@ function wireEvents() {
     event.preventDefault();
     showContextMenu(event.clientX, event.clientY, folderMenuItems());
   });
-  makeDropTarget($("#driveView"), () => state.folderId);
+  wireDriveDragDropTargets();
   $("#folderMenuButton").addEventListener("click", (event) => {
     event.stopPropagation();
     const rect = event.currentTarget.getBoundingClientRect();
@@ -5071,25 +5219,36 @@ function wireEvents() {
     void uploadFolderFiles(files).catch(showError);
   });
   window.addEventListener("dragenter", (event) => {
-    if (!event.dataTransfer?.types?.includes("Files")) return;
+    if (!isExternalFileDrag(event)) return;
     event.preventDefault();
     state.dragDepth++;
     $("#dropOverlay").classList.remove("hidden");
   });
   window.addEventListener("dragover", (event) => {
-    if (!event.dataTransfer?.types?.includes("Files")) return;
-    event.preventDefault();
-    event.dataTransfer.dropEffect = "copy";
+    if (isExternalFileDrag(event)) {
+      event.preventDefault();
+      event.dataTransfer.dropEffect = "copy";
+      return;
+    }
+    if (isInternalDriveDrag(event)) {
+      event.preventDefault();
+      event.dataTransfer.dropEffect = "move";
+    }
   });
   window.addEventListener("dragleave", (event) => {
-    if (!event.dataTransfer?.types?.includes("Files")) return;
+    if (!isExternalFileDrag(event)) return;
     state.dragDepth = Math.max(0, state.dragDepth - 1);
     if (state.dragDepth === 0) {
       $("#dropOverlay").classList.add("hidden");
     }
   });
   window.addEventListener("drop", (event) => {
-    if (event.dataTransfer?.types?.includes(INTERNAL_DRAG_TYPE)) return;
+    if (!isExternalFileDrag(event)) {
+      if (dragTypes(event).includes(INTERNAL_DRAG_TYPE)) {
+        event.preventDefault();
+      }
+      return;
+    }
     if (!event.dataTransfer?.files?.length && !event.dataTransfer?.items?.length) return;
     event.preventDefault();
     state.dragDepth = 0;
@@ -5241,10 +5400,7 @@ async function init() {
     } else if (state.view === "music") {
       await Promise.all([loadQuota(), loadMusic()]);
     } else {
-      await Promise.all([loadQuota(), loadDrive()]);
-    }
-    if (state.searchActive) {
-      await runSearch($("#searchForm"));
+      await Promise.all([loadQuota(), refreshDriveView()]);
     }
     if (state.view === "trash") await loadTrash();
     if (state.view === "queue") await loadQueue();
