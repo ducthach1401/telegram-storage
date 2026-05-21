@@ -14,6 +14,7 @@ import { MimeType } from '../common/http.constants';
 import { RuntimeConfigService } from '../settings/runtime-config.service';
 import { StorageService } from '../storage/storage.service';
 import { TelegramService } from '../storage/telegram/telegram.service';
+import { enforceTempStorageLimit } from '../storage/tmp-storage-limit';
 
 /** Telegram Bot document ~50MB — giữ biên an toàn */
 const TELEGRAM_DOC_MAX_BYTES = 49 * 1024 * 1024;
@@ -85,6 +86,7 @@ export class MysqlBackupSchedulerService implements OnModuleInit {
     const baseTmp =
       this.config.get<string>(EnvKey.UPLOAD_TMP_DIR)?.trim() ||
       join(process.cwd(), 'tmp', 'uploads');
+    await enforceTempStorageLimit(baseTmp);
     const dir = join(baseTmp, 'mysql-backup');
     await mkdir(dir, { recursive: true });
 

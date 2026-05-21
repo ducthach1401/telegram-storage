@@ -45,7 +45,7 @@ Sao chép `.env.example` → `.env` và chỉnh giá trị thật (MySQL, Redis,
 
 **Telegram — lưu file / webhook:** **bot token** của admin đầu tiên trong **`accounts`** (Cài đặt → Kết nối Telegram). **Chat lưu chung** cho user không có bot/chat riêng: **`TELEGRAM_STORAGE_CHAT_FOR_PUBLIC_ID`** trong **`app_settings`** (không đọc env) — **ưu tiên** trên `telegramStorageChatId` trên admin đầu tiên khi merge và webhook gửi file. **`TELEGRAM_ALERT_CHAT_ID`** (tin cảnh báo) chỉ trong **`app_settings`**.
 
-Tuỳ chọn (mặc định trong code): `UPLOAD_TMP_DIR`, `UPLOAD_QUEUE_CONCURRENCY` (ZIP async: `UPLOAD_TMP_DIR/folder-zip/`; backup SQL tạm: `UPLOAD_TMP_DIR/mysql-backup/`; import SQL API: `UPLOAD_TMP_DIR/mysql-import/`).
+Tuỳ chọn (mặc định trong code): `UPLOAD_TMP_DIR`, `UPLOAD_QUEUE_CONCURRENCY` (ZIP async: `UPLOAD_TMP_DIR/folder-zip/`; backup SQL tạm: `UPLOAD_TMP_DIR/mysql-backup/`; import SQL API: `UPLOAD_TMP_DIR/mysql-import/`). Temp được auto dọn file cũ để giữ tổng dung lượng trong `UPLOAD_TMP_DIR` tối đa ~`512MB`.
 
 MySQL chỉ trong network Compose (`MYSQL_HOST=mysql`). Redis chỉ internal (`REDIS_HOST=redis`).
 
@@ -141,6 +141,7 @@ Global guard: **Basic Auth** cho hầu hết route (hai biến env không đư�
 
 - **Đồng bộ ngược Telegram:** `POST /api/v1/telegram/webhook` — nên đặt `TELEGRAM_WEBHOOK_SECRET` (env) và cấu hình cùng secret khi `setWebhook`. File lưu vào `TELEGRAM_SYNC_FOLDER_ID` (Cài đặt admin / env) hoặc root nếu để trống. Tin không có `document` hoặc không khớp account theo chat ID đã lưu trong DB thì bỏ qua (trả `200` không xử lý).
 - **ZIP async:** file ZIP nằm dưới `UPLOAD_TMP_DIR/folder-zip/`; token tải ký bằng `DOWNLOAD_SHARE_SECRET`, TTL `FOLDER_ZIP_DOWNLOAD_TOKEN_TTL_SECONDS`.
+- **Giới hạn temp:** trước mỗi lần ghi file tạm, server tự dọn file cũ nhất trong `UPLOAD_TMP_DIR` để giữ tổng dung lượng khoảng `<= 512MB`; nếu vẫn vượt ngưỡng thì request mới sẽ bị từ chối.
 - **Backup MySQL:** dump được đưa vào **cùng kênh lưu file của admin đầu tiên** và một **thư mục ảo** dưới root (`MYSQL_BACKUP_FOLDER_NAME`, mặc định `backup`), có metadata trong DB như upload thường. Image production có `mysqldump` (Alpine `mariadb-client`). Dev `docker-compose.dev.yml` (`node:22-alpine`) **không** có sẵn — cài `mariadb-client` hoặc `MYSQL_BACKUP_ENABLED=false`. File `.sql.gz` **≤ ~49MB** (Telegram ~50MB); vượt chỉ gửi cảnh báo text qua **`TELEGRAM_ALERT_CHAT_ID`** trong Cài đặt server (nếu có).
 - **Import MySQL qua API:** `POST /api/v1/admin/mysql/import` dùng lệnh `mysql` (cùng `mariadb-client` như backup). Dev image không có CLI thì endpoint thất bại với thông báo thiếu `mysql`; giới hạn kích thước `MYSQL_IMPORT_MAX_MB`.
 - **Copy thư mục:** nhiều bản ghi có thể trỏ cùng `telegram_message_id` — xóa một bản chỉ gọi `deleteMessage` khi không còn bản ghi nào khác trỏ tin đó (reconcile dùng `deleteFile` nên cùng logic).

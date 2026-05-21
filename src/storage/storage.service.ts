@@ -69,6 +69,7 @@ import {
   telegramUploadDocument,
 } from './telegram/telegram-bot.operations';
 import { RuntimeConfigService } from '../settings/runtime-config.service';
+import { enforceTempStorageLimit } from './tmp-storage-limit';
 
 export interface ListContentsOpts {
   /** Khi có — phân trang file theo cursor */
@@ -1391,6 +1392,7 @@ export class StorageService implements OnModuleInit {
     zipBaseName: string,
     absoluteZipPath: string,
   ): Promise<void> {
+    await enforceTempStorageLimit(dirname(dirname(absoluteZipPath)));
     await mkdir(dirname(absoluteZipPath), { recursive: true });
     const output = createWriteStream(absoluteZipPath);
     const archive = createZipArchive();

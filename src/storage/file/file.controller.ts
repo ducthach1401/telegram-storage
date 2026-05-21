@@ -391,16 +391,22 @@ export class FileController {
     const t = this.tenant(account);
     const { finalFileName } = await this.storage.prepareAsyncUpload(t, folderId, file.originalname, policy);
 
-    const job = await this.uploadQueue.add(FILE_UPLOAD_JOB_NAME, {
-      tenant: t,
-      tempPath: file.path,
-      folderId,
-      finalFileName,
-      mimeType: file.mimetype,
-      allowDuplicateContent: allowDuplicateContent === '1' || allowDuplicateContent === 'true',
-    });
+    const job = await this.uploadQueue
+      .add(FILE_UPLOAD_JOB_NAME, {
+        tenant: t,
+        tempPath: file.path,
+        folderId,
+        finalFileName,
+        mimeType: file.mimetype,
+        allowDuplicateContent: allowDuplicateContent === '1' || allowDuplicateContent === 'true',
+      })
+      .catch(async (err: unknown) => {
+        await unlink(file.path).catch(() => undefined);
+        throw err;
+      });
 
     if (job.id === undefined) {
+      await unlink(file.path).catch(() => undefined);
       throw new BadGatewayException(ApiExceptionMessage.QUEUE_JOB_CREATE_FAILED);
     }
 
