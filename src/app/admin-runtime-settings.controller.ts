@@ -32,7 +32,7 @@ export class AdminRuntimeSettingsController {
   @ApiOperation({
     summary: 'Cấu hình vận hành (runtime)',
     description:
-      'Khi khởi động, các khóa Cài đặt server thiếu được tạo trong `app_settings` (lần đầu có thể lấy từ env). Khi đã có trong DB, giá trị hiệu lực chỉ từ DB — không fallback env. `TELEGRAM_STORAGE_CHAT_FOR_PUBLIC_ID` / `TELEGRAM_ALERT_CHAT_ID` không fallback env nếu chưa có dòng DB. Bot token trên admin đầu tiên. UPLOAD_QUEUE_* chỉ đọc khi worker khởi động.',
+      'Khi khởi động, các khóa Cài đặt server thiếu được tạo trong `app_settings` (lần đầu có thể lấy từ env). Khi đã có trong DB, giá trị hiệu lực chỉ từ DB — không fallback env. `TELEGRAM_STORAGE_CHAT_FOR_PUBLIC_ID` / `TELEGRAM_ALERT_CHAT_ID` không fallback env nếu chưa có dòng DB. Bot token trên admin đầu tiên. UPLOAD_QUEUE_* cấu hình qua DB; worker cần khởi động lại để áp dụng đầy đủ.',
   })
   @ApiOkResponse()
   get(): {
@@ -46,7 +46,7 @@ export class AdminRuntimeSettingsController {
       overriddenKeys: this.runtime.overrideKeys(),
       queueWorkerEnv: this.runtime.queueEnvSnapshot(),
       queueWorkerHint:
-        'UPLOAD_QUEUE_CONCURRENCY / ATTEMPTS / BACKOFF chỉ áp dụng sau khi đổi env và khởi động lại worker.',
+        'UPLOAD_QUEUE_CONCURRENCY / ATTEMPTS / BACKOFF quản lý qua Cài đặt server. Sau khi đổi, cần khởi động lại worker để áp dụng đầy đủ.',
     };
   }
 
@@ -73,7 +73,7 @@ export class AdminRuntimeSettingsController {
       overriddenKeys: this.runtime.overrideKeys(),
       queueWorkerEnv: this.runtime.queueEnvSnapshot(),
       queueWorkerHint:
-        'UPLOAD_QUEUE_CONCURRENCY / ATTEMPTS / BACKOFF chỉ áp dụng sau khi đổi env và khởi động lại worker.',
+        'UPLOAD_QUEUE_CONCURRENCY / ATTEMPTS / BACKOFF quản lý qua Cài đặt server. Sau khi đổi, cần khởi động lại worker để áp dụng đầy đủ.',
       webhook,
     };
   }

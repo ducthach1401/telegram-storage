@@ -107,6 +107,42 @@ export class RuntimeConfigService implements OnModuleInit {
         const fromEnv = allowEnv ? trim(get(EnvKey.TELEGRAM_SYNC_FOLDER_ID)) : '';
         return fromEnv || ROOT_FOLDER_ALIAS;
       }
+      case EnvKey.UPLOAD_QUEUE_CONCURRENCY: {
+        const n = Number(
+          (allowEnv ? get(EnvKey.UPLOAD_QUEUE_CONCURRENCY) : undefined) ??
+            String(UploadDefaults.QUEUE_CONCURRENCY_FALLBACK),
+        );
+        return String(
+          Math.max(
+            1,
+            Number.isFinite(n) ? Math.floor(n) : UploadDefaults.QUEUE_CONCURRENCY_FALLBACK,
+          ),
+        );
+      }
+      case EnvKey.UPLOAD_QUEUE_ATTEMPTS: {
+        const n = Number(
+          (allowEnv ? get(EnvKey.UPLOAD_QUEUE_ATTEMPTS) : undefined) ??
+            String(UploadDefaults.QUEUE_ATTEMPTS_FALLBACK),
+        );
+        return String(
+          Math.max(
+            1,
+            Number.isFinite(n) ? Math.floor(n) : UploadDefaults.QUEUE_ATTEMPTS_FALLBACK,
+          ),
+        );
+      }
+      case EnvKey.UPLOAD_QUEUE_BACKOFF_MS: {
+        const n = Number(
+          (allowEnv ? get(EnvKey.UPLOAD_QUEUE_BACKOFF_MS) : undefined) ??
+            String(UploadDefaults.QUEUE_BACKOFF_MS_FALLBACK),
+        );
+        return String(
+          Math.max(
+            1000,
+            Number.isFinite(n) ? Math.floor(n) : UploadDefaults.QUEUE_BACKOFF_MS_FALLBACK,
+          ),
+        );
+      }
       case EnvKey.SHARE_RATE_LIMIT_TTL_MS: {
         const n = Number(
           (allowEnv ? get(EnvKey.SHARE_RATE_LIMIT_TTL_MS) : undefined) ?? '60000',
@@ -231,7 +267,7 @@ export class RuntimeConfigService implements OnModuleInit {
   queueEnvSnapshot(): Record<string, number> {
     const out: Record<string, number> = {};
     for (const k of ADMIN_READONLY_QUEUE_KEYS) {
-      const raw = process.env[k];
+      const raw = this.effectiveRaw(k);
       const n = Number(raw);
       if (k === EnvKey.UPLOAD_QUEUE_CONCURRENCY) {
         out[k] = Math.max(
@@ -268,6 +304,36 @@ export class RuntimeConfigService implements OnModuleInit {
   }
 
   private serializeEffectiveForAdmin(key: AdminPatchableKey): string | number | boolean {
+    if (key === EnvKey.UPLOAD_QUEUE_CONCURRENCY) {
+      const n = Number(
+        this.effectiveRaw(EnvKey.UPLOAD_QUEUE_CONCURRENCY) ??
+          String(UploadDefaults.QUEUE_CONCURRENCY_FALLBACK),
+      );
+      return Math.max(
+        1,
+        Number.isFinite(n) ? Math.floor(n) : UploadDefaults.QUEUE_CONCURRENCY_FALLBACK,
+      );
+    }
+    if (key === EnvKey.UPLOAD_QUEUE_ATTEMPTS) {
+      const n = Number(
+        this.effectiveRaw(EnvKey.UPLOAD_QUEUE_ATTEMPTS) ??
+          String(UploadDefaults.QUEUE_ATTEMPTS_FALLBACK),
+      );
+      return Math.max(
+        1,
+        Number.isFinite(n) ? Math.floor(n) : UploadDefaults.QUEUE_ATTEMPTS_FALLBACK,
+      );
+    }
+    if (key === EnvKey.UPLOAD_QUEUE_BACKOFF_MS) {
+      const n = Number(
+        this.effectiveRaw(EnvKey.UPLOAD_QUEUE_BACKOFF_MS) ??
+          String(UploadDefaults.QUEUE_BACKOFF_MS_FALLBACK),
+      );
+      return Math.max(
+        1000,
+        Number.isFinite(n) ? Math.floor(n) : UploadDefaults.QUEUE_BACKOFF_MS_FALLBACK,
+      );
+    }
     if (key === EnvKey.SHARE_RATE_LIMIT_TTL_MS) {
       return this.shareRateLimitTtlMs();
     }
@@ -331,6 +397,24 @@ export class RuntimeConfigService implements OnModuleInit {
               ? 'true'
               : 'false'
             : String(val).trim();
+      if (envKey === EnvKey.UPLOAD_QUEUE_CONCURRENCY) {
+        const n = Number(str);
+        if (!Number.isFinite(n) || n < 1) {
+          throw new BadRequestException('UPLOAD_QUEUE_CONCURRENCY không hợp lệ');
+        }
+      }
+      if (envKey === EnvKey.UPLOAD_QUEUE_ATTEMPTS) {
+        const n = Number(str);
+        if (!Number.isFinite(n) || n < 1) {
+          throw new BadRequestException('UPLOAD_QUEUE_ATTEMPTS không hợp lệ');
+        }
+      }
+      if (envKey === EnvKey.UPLOAD_QUEUE_BACKOFF_MS) {
+        const n = Number(str);
+        if (!Number.isFinite(n) || n < 1000) {
+          throw new BadRequestException('UPLOAD_QUEUE_BACKOFF_MS không hợp lệ');
+        }
+      }
       if (
         envKey === EnvKey.MYSQL_BACKUP_CRON &&
         str.length > 0 &&

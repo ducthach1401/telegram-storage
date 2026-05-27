@@ -15,6 +15,9 @@ export const ADMIN_PATCHABLE_KEYS = [
   EnvKey.PUBLIC_APP_URL,
   ...TELEGRAM_DB_ONLY_KEYS,
   EnvKey.TELEGRAM_SYNC_FOLDER_ID,
+  EnvKey.UPLOAD_QUEUE_CONCURRENCY,
+  EnvKey.UPLOAD_QUEUE_ATTEMPTS,
+  EnvKey.UPLOAD_QUEUE_BACKOFF_MS,
   EnvKey.SHARE_RATE_LIMIT_TTL_MS,
   EnvKey.SHARE_RATE_LIMIT_MAX,
   EnvKey.FOLDER_ZIP_MAX_FILES,
@@ -31,7 +34,7 @@ export type AdminPatchableKey = (typeof ADMIN_PATCHABLE_KEYS)[number];
 /** Tập khóa Cài đặt server — khi đã có dòng DB thì `effectiveRaw` không fallback env. */
 export const ADMIN_PATCHABLE_KEY_SET = new Set<string>(ADMIN_PATCHABLE_KEYS);
 
-/** Chỉ đọc từ env khi worker khởi động — hiển thị trên UI, không PATCH DB. */
+/** Queue keys do admin UI quản lý trong DB (vẫn cần restart worker để áp dụng fully). */
 export const ADMIN_READONLY_QUEUE_KEYS = [
   EnvKey.UPLOAD_QUEUE_CONCURRENCY,
   EnvKey.UPLOAD_QUEUE_ATTEMPTS,

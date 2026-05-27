@@ -1,5 +1,5 @@
 /**
- * PM2 — 1 process fork (Telegram + TypeORM không nên cluster).
+ * PM2 — 3 process cluster.
  * Biến môi trường do Docker / `.env` inject, không ghi đè ở đây.
  */
 const path = require('path');
@@ -11,8 +11,8 @@ module.exports = {
       cwd: path.resolve(__dirname),
       script: 'dist/src/main.js',
 
-      instances: 1,
-      exec_mode: 'fork',
+      instances: 3,
+      exec_mode: 'cluster',
       watch: false,
 
       autorestart: true,

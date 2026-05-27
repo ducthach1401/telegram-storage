@@ -46,6 +46,27 @@ export class UpdateAdminSettingsDto {
   @MaxLength(64)
   TELEGRAM_SYNC_FOLDER_ID?: string | null;
 
+  @ApiPropertyOptional({ nullable: true, description: 'Số job upload queue xử lý song song.' })
+  @IsOptional()
+  @ValidateIf((_, v) => v !== null && v !== undefined)
+  @IsNumber()
+  @Min(1)
+  UPLOAD_QUEUE_CONCURRENCY?: number | null;
+
+  @ApiPropertyOptional({ nullable: true, description: 'Số lần retry tối đa cho mỗi upload job.' })
+  @IsOptional()
+  @ValidateIf((_, v) => v !== null && v !== undefined)
+  @IsNumber()
+  @Min(1)
+  UPLOAD_QUEUE_ATTEMPTS?: number | null;
+
+  @ApiPropertyOptional({ nullable: true, description: 'Độ trễ backoff cơ bản (ms) cho retry upload job.' })
+  @IsOptional()
+  @ValidateIf((_, v) => v !== null && v !== undefined)
+  @IsNumber()
+  @Min(1000)
+  UPLOAD_QUEUE_BACKOFF_MS?: number | null;
+
   @ApiPropertyOptional({ nullable: true })
   @IsOptional()
   @ValidateIf((_, v) => v !== null && v !== undefined)

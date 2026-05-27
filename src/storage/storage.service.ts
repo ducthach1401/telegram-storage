@@ -852,7 +852,6 @@ export class StorageService implements OnModuleInit {
       Math.max(0, Number.isFinite(gb) ? gb : 0) * 1024 * 1024 * 1024,
     );
     const minioLimitBytes = accountMinioLimitBytes > 0 ? accountMinioLimitBytes : 0;
-
     return {
       totalFiles: Number(active?.files ?? 0),
       totalFolders,
@@ -1274,6 +1273,25 @@ export class StorageService implements OnModuleInit {
       await this.removeFileFromDbAndTelegram(file);
     }
     await this.folderRepo.delete({ id: folderId });
+  }
+
+  async streamThumbnailToExpressResponse(
+    t: StorageTenant,
+    storedFileId: string,
+    res: Response,
+    opts: { includeTrashed?: boolean } = {},
+  ): Promise<void> {
+    const f = await this.getFileForRead(t, storedFileId, opts.includeTrashed);
+    const thumbId = f.thumbnailTelegramFileId;
+    if (!thumbId) {
+      throw new NotFoundException(ApiExceptionMessage.FILE_NO_THUMBNAIL);
+    }
+    const r = await this.fetchTelegramFileResponse(t, thumbId).catch(() => {
+      throw new BadGatewayException(ApiExceptionMessage.TELEGRAM_THUMB_DOWNLOAD_FAILED);
+    });
+    res.setHeader(HttpHeader.CONTENT_TYPE, MimeType.JPEG);
+    res.setHeader(HttpHeader.CACHE_CONTROL, CacheControlValue.PRIVATE_MONTH);
+    Readable.fromWeb(r.body as import('stream/web').ReadableStream).pipe(res);
   }
 
   /** Stream file gốc từ Telegram ra Express response (download / view / link chia sẻ). */

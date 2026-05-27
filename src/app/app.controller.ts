@@ -4,7 +4,10 @@ import type { Account } from "../accounts/account.entity";
 import { AccountService } from "../accounts/account.service";
 import { CurrentAccount } from "../accounts/current-account.decorator";
 import { API_V1_PREFIX } from "../common/api-route";
+import { EnvKey } from "../common/env-keys";
 import { HttpHeader, MimeType } from "../common/http.constants";
+import { UploadDefaults } from "../common/upload.defaults";
+import { RuntimeConfigService } from "../settings/runtime-config.service";
 import { AppService } from "./app.service";
 
 @ApiTags("app")
@@ -13,6 +16,7 @@ export class AppController {
   constructor(
     private readonly app: AppService,
     private readonly accounts: AccountService,
+    private readonly runtime: RuntimeConfigService,
   ) {}
 
   @Get()
@@ -40,6 +44,7 @@ export class AppController {
         telegramStorageChatId: { type: "string" },
         hasTelegramBotToken: { type: "boolean" },
         isPrimaryAdmin: { type: "boolean" },
+        uploadQueueConcurrency: { type: "number", example: 8 },
         id: { type: "string" },
       },
     },
@@ -57,7 +62,15 @@ export class AppController {
     telegramStorageChatId: string;
     hasTelegramBotToken: boolean;
     isPrimaryAdmin: boolean;
+    uploadQueueConcurrency: number;
   } {
+    const queueConcurrency = Math.max(
+      1,
+      Number(
+        this.runtime.effectiveRaw(EnvKey.UPLOAD_QUEUE_CONCURRENCY) ??
+          String(UploadDefaults.QUEUE_CONCURRENCY_FALLBACK),
+      ),
+    );
     return {
       ok: true,
       service: this.app.getServiceName(),
@@ -71,6 +84,7 @@ export class AppController {
       telegramStorageChatId: account.telegramStorageChatId ?? '',
       hasTelegramBotToken: Boolean(account.telegramBotToken?.trim()),
       isPrimaryAdmin: this.accounts.isPrimaryAdminSync(account.id),
+      uploadQueueConcurrency: queueConcurrency,
     };
   }
 }

@@ -40,7 +40,6 @@ import type { Account } from '../../accounts/account.entity';
 import { CurrentAccount } from '../../accounts/current-account.decorator';
 import { Queue } from 'bullmq';
 import { Response } from 'express';
-import { Readable } from 'stream';
 import { ApiExceptionMessage } from '../../common/api-messages';
 import { API_V1_PREFIX } from '../../common/api-route';
 import { ROOT_FOLDER_ALIAS } from '../domain/constants';
@@ -53,10 +52,8 @@ import { PatchFileDto } from '../domain/dto/patch-file.dto';
 import { ShareDownloadLinkResponseDto } from '../domain/dto/share-download-link-response.dto';
 import { EnvKey } from '../../common/env-keys';
 import {
-  CacheControlValue,
   ContentDispositionMode,
   HttpHeader,
-  MimeType,
 } from '../../common/http.constants';
 import { RuntimeConfigService } from '../../settings/runtime-config.service';
 import {
@@ -272,18 +269,12 @@ export class FileController {
     @Param('id', ParseUUIDPipe) id: string,
     @Res({ passthrough: false }) res: Response,
   ) {
-    const t = this.tenant(account);
-    const f = await this.storage.getFileForRead(t, id, true);
-    const thumbId = f.thumbnailTelegramFileId;
-    if (!thumbId) {
-      throw new NotFoundException(ApiExceptionMessage.FILE_NO_THUMBNAIL);
-    }
-    const r = await this.storage.fetchTelegramFileResponse(t, thumbId).catch(() => {
-      throw new BadGatewayException(ApiExceptionMessage.TELEGRAM_THUMB_DOWNLOAD_FAILED);
-    });
-    res.setHeader(HttpHeader.CONTENT_TYPE, MimeType.JPEG);
-    res.setHeader(HttpHeader.CACHE_CONTROL, CacheControlValue.PRIVATE_MONTH);
-    Readable.fromWeb(r.body as import('stream/web').ReadableStream).pipe(res);
+    await this.storage.streamThumbnailToExpressResponse(
+      this.tenant(account),
+      id,
+      res,
+      { includeTrashed: true },
+    );
   }
 
   @Post(FileRoutePath.UPLOAD)
@@ -697,18 +688,11 @@ export class FileController {
     @Param('id', ParseUUIDPipe) id: string,
     @Res({ passthrough: false }) res: Response,
   ) {
-    const t = this.tenant(account);
-    const f = await this.storage.getFile(t, id);
-    const thumbId = f.thumbnailTelegramFileId;
-    if (!thumbId) {
-      throw new NotFoundException(ApiExceptionMessage.FILE_NO_THUMBNAIL);
-    }
-    const r = await this.storage.fetchTelegramFileResponse(t, thumbId).catch(() => {
-      throw new BadGatewayException(ApiExceptionMessage.TELEGRAM_THUMB_DOWNLOAD_FAILED);
-    });
-    res.setHeader(HttpHeader.CONTENT_TYPE, MimeType.JPEG);
-    res.setHeader(HttpHeader.CACHE_CONTROL, CacheControlValue.PRIVATE_MONTH);
-    Readable.fromWeb(r.body as import('stream/web').ReadableStream).pipe(res);
+    await this.storage.streamThumbnailToExpressResponse(
+      this.tenant(account),
+      id,
+      res,
+    );
   }
 
   private static toSummary(

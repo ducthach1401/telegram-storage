@@ -7,6 +7,7 @@ import { Account } from '../accounts/account.entity';
 import { EnvKey } from '../common/env-keys';
 import { UploadDefaults } from '../common/upload.defaults';
 import { SettingsModule } from '../settings/settings.module';
+import { RuntimeConfigService } from '../settings/runtime-config.service';
 import { FileTag } from './domain/entities/file-tag.entity';
 import { Folder } from './domain/entities/folder.entity';
 import { StoredFile } from './domain/entities/stored-file.entity';
@@ -50,30 +51,38 @@ import { TelegramService } from './telegram/telegram.service';
         },
       }),
     }),
-    BullModule.registerQueue({
+    BullModule.registerQueueAsync({
       name: FILE_UPLOAD_QUEUE,
-      defaultJobOptions: {
-        attempts: Math.max(
+      imports: [SettingsModule],
+      inject: [RuntimeConfigService],
+      useFactory: (runtime: RuntimeConfigService) => {
+        const attempts = Math.max(
           1,
           Number(
-            process.env[EnvKey.UPLOAD_QUEUE_ATTEMPTS] ??
+            runtime.effectiveRaw(EnvKey.UPLOAD_QUEUE_ATTEMPTS) ??
               String(UploadDefaults.QUEUE_ATTEMPTS_FALLBACK),
           ),
-        ),
-        backoff: {
-          type: BullMqBackoffType.EXPONENTIAL,
-          delay: Math.max(
-            1000,
-            Number(
-              process.env[EnvKey.UPLOAD_QUEUE_BACKOFF_MS] ??
-                String(UploadDefaults.QUEUE_BACKOFF_MS_FALLBACK),
-            ),
+        );
+        const backoffMs = Math.max(
+          1000,
+          Number(
+            runtime.effectiveRaw(EnvKey.UPLOAD_QUEUE_BACKOFF_MS) ??
+              String(UploadDefaults.QUEUE_BACKOFF_MS_FALLBACK),
           ),
-        },
-        removeOnComplete: {
-          count: 500,
-        },
-        removeOnFail: false,
+        );
+        return {
+          defaultJobOptions: {
+            attempts,
+            backoff: {
+              type: BullMqBackoffType.EXPONENTIAL,
+              delay: backoffMs,
+            },
+            removeOnComplete: {
+              count: 500,
+            },
+            removeOnFail: false,
+          },
+        };
       },
     }),
     BullModule.registerQueue({

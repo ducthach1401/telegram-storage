@@ -1,5 +1,5 @@
 import { OnWorkerEvent, Processor, WorkerHost } from '@nestjs/bullmq';
-import { Logger } from '@nestjs/common';
+import { Logger, OnModuleInit } from '@nestjs/common';
 import { Job, UnrecoverableError } from 'bullmq';
 import { stat, unlink } from 'fs/promises';
 import { StoredFile } from '../domain/entities/stored-file.entity';
@@ -9,6 +9,7 @@ import { StorageService } from '../storage.service';
 import { EnvKey } from '../../common/env-keys';
 import { UploadDefaults } from '../../common/upload.defaults';
 import { StorageExceptionMessage } from '../../common/api-messages';
+import { RuntimeConfigService } from '../../settings/runtime-config.service';
 import {
   BullMqWorkerEvent,
   FILE_UPLOAD_QUEUE,
@@ -24,23 +25,30 @@ export interface FileUploadJobData {
   allowDuplicateContent?: boolean;
 }
 
-const workerConcurrency = Math.max(
-  1,
-  Number(
-    process.env[EnvKey.UPLOAD_QUEUE_CONCURRENCY] ??
-      String(UploadDefaults.QUEUE_CONCURRENCY_FALLBACK),
-  ),
-);
-
-@Processor(FILE_UPLOAD_QUEUE, { concurrency: workerConcurrency })
-export class FileUploadProcessor extends WorkerHost {
+@Processor(FILE_UPLOAD_QUEUE)
+export class FileUploadProcessor extends WorkerHost implements OnModuleInit {
   private readonly log = new Logger(FileUploadProcessor.name);
 
   constructor(
     private readonly storage: StorageService,
     private readonly telegram: TelegramService,
+    private readonly runtime: RuntimeConfigService,
   ) {
     super();
+  }
+
+  onModuleInit(): void {
+    const configured = Math.max(
+      1,
+      Number(
+        this.runtime.effectiveRaw(EnvKey.UPLOAD_QUEUE_CONCURRENCY) ??
+          String(UploadDefaults.QUEUE_CONCURRENCY_FALLBACK),
+      ),
+    );
+    if (this.worker) {
+      this.worker.concurrency = configured;
+      this.log.log(`Upload queue concurrency = ${configured}`);
+    }
   }
 
   async process(job: Job<FileUploadJobData>): Promise<StoredFile> {

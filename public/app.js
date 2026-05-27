@@ -18,12 +18,15 @@ const ACTIVE_TRANSFER_STORAGE_KEY = "tg-drive-active-transfers";
 let loadDriveRequestId = 0;
 const MUSIC_LIBRARY_STORAGE_PREFIX = "tg-drive-music-library";
 
-/** Khớp PATCH /admin/settings (không gồm queue worker). */
+/** Khớp PATCH /admin/settings. */
 const RUNTIME_ADMIN_FORM_ROWS = [
   ["PUBLIC_APP_URL", "text"],
   ["TELEGRAM_STORAGE_CHAT_FOR_PUBLIC_ID", "text"],
   ["TELEGRAM_ALERT_CHAT_ID", "text"],
   ["TELEGRAM_SYNC_FOLDER_ID", "text"],
+  ["UPLOAD_QUEUE_CONCURRENCY", "number"],
+  ["UPLOAD_QUEUE_ATTEMPTS", "number"],
+  ["UPLOAD_QUEUE_BACKOFF_MS", "number"],
   ["SHARE_RATE_LIMIT_TTL_MS", "number"],
   ["SHARE_RATE_LIMIT_MAX", "number"],
   ["FOLDER_ZIP_MAX_FILES", "number"],
@@ -35,9 +38,13 @@ const RUNTIME_ADMIN_FORM_ROWS = [
   ["MYSQL_BACKUP_FOLDER_NAME", "text"],
 ];
 const PREVIEW_CACHE_NAME = "tg-drive-preview-cache-v1";
+const PREVIEW_CACHE_META_KEY = "tg-drive-preview-cache-meta-v1";
+const PREVIEW_CACHE_MAX_BYTES = 300 * 1024 * 1024;
+const PREVIEW_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const UPLOAD_DB_NAME = "tg-drive-upload-queue";
 const UPLOAD_STORE_NAME = "uploads";
 const UPLOAD_RETRY_DELAY_MS = 15000;
+const UPLOAD_QUEUE_PARALLEL_FALLBACK = 3;
 /** Poll GET …/upload/jobs/:id — worker Telegram có thể giữ job `active` vài phút. */
 const UPLOAD_JOB_POLL_QUICK_MS = 1200;
 const UPLOAD_JOB_POLL_MEDIUM_MS = 3000;
@@ -45,6 +52,65 @@ const UPLOAD_JOB_POLL_SLOW_MS = 5000;
 /** Khớp TELEGRAM_ONLY_UPLOAD_MAX_BYTES — file ≥ mức này mới tính quota MinIO account. */
 const TELEGRAM_ONLY_UPLOAD_MAX_BYTES = 20 * 1024 * 1024;
 const objectUrlCache = new Map();
+const previewWarmCacheUrls = new Set();
+const PREVIEW_WARM_BATCH_SIZE = 12;
+let uploadDbPromise = null;
+
+function readPreviewCacheMeta() {
+  try {
+    const raw = localStorage.getItem(PREVIEW_CACHE_META_KEY);
+    const parsed = raw ? JSON.parse(raw) : {};
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function writePreviewCacheMeta(meta) {
+  try {
+    localStorage.setItem(PREVIEW_CACHE_META_KEY, JSON.stringify(meta || {}));
+  } catch {
+    // Ignore storage quota errors.
+  }
+}
+
+function dropCachedObjectUrl(url) {
+  const objectUrl = objectUrlCache.get(url);
+  if (!objectUrl) return;
+  URL.revokeObjectURL(objectUrl);
+  objectUrlCache.delete(url);
+}
+
+async function prunePreviewCache(cache, meta) {
+  const now = Date.now();
+  const entries = Object.entries(meta || {});
+  for (const [url, info] of entries) {
+    if (!info?.lastViewedAt || now - Number(info.lastViewedAt) <= PREVIEW_CACHE_TTL_MS) continue;
+    await cache.delete(url).catch(() => undefined);
+    dropCachedObjectUrl(url);
+    delete meta[url];
+  }
+
+  let items = Object.entries(meta || {}).map(([url, info]) => ({
+    url,
+    size: Math.max(0, Number(info?.size || 0)),
+    lastViewedAt: Number(info?.lastViewedAt || 0),
+  }));
+  let total = items.reduce((sum, item) => sum + item.size, 0);
+  if (total <= PREVIEW_CACHE_MAX_BYTES) {
+    return;
+  }
+  items.sort((a, b) => a.lastViewedAt - b.lastViewedAt);
+  for (const item of items) {
+    await cache.delete(item.url).catch(() => undefined);
+    dropCachedObjectUrl(item.url);
+    total -= item.size;
+    delete meta[item.url];
+    if (total <= PREVIEW_CACHE_MAX_BYTES) {
+      break;
+    }
+  }
+}
 
 function isCompactTransferMode() {
   return (
@@ -117,6 +183,7 @@ const i18n = {
     settingsHintNonAdmin: "Thông tin tài khoản và kết nối Telegram.",
     telegramSaveConnection: "Lưu kết nối Telegram",
     minioQuotaLabel: "MinIO",
+    previewCacheLabel: "Cache ảnh (1GB)",
     adminAccountQuotaTitle: "Quota MinIO theo tài khoản (admin)",
     accountLabel: "Tài khoản",
     roleLabel: "Vai trò",
@@ -140,10 +207,10 @@ const i18n = {
     telegramSaved: "Đã lưu cấu hình Telegram",
     systemSettingsTitle: "Cấu hình server",
     systemSettingsHint:
-      "`TELEGRAM_STORAGE_CHAT_FOR_PUBLIC_ID` (chat lưu chung — chỉ UI/DB, không env), chat cảnh báo (`TELEGRAM_ALERT_CHAT_ID`), URL công khai, ZIP, backup MySQL… Bot token trên tài khoản admin (Cài đặt → Kết nối Telegram). Áp dụng ngay (worker queue chỉ đọc từ env khi khởi động).",
+      "`TELEGRAM_STORAGE_CHAT_FOR_PUBLIC_ID` (chat lưu chung — chỉ UI/DB), chat cảnh báo (`TELEGRAM_ALERT_CHAT_ID`), URL công khai, queue upload, ZIP, backup MySQL… Bot token trên tài khoản admin (Cài đặt → Kết nối Telegram).",
     runtimeSave: "Lưu cấu hình",
     runtimeSaved: "Đã lưu cấu hình server",
-    queueWorkerTitle: "Upload queue (chỉ env)",
+    queueWorkerTitle: "Upload queue",
     runtimeOverridesHint: "Khóa trong app_settings (khởi tạo đủ khi chạy app lần đầu)",
     storage: "Dung lượng",
     quickSearch: "Tìm trong drive",
@@ -332,6 +399,7 @@ const i18n = {
     settingsHintNonAdmin: "Account info and Telegram connection.",
     telegramSaveConnection: "Save Telegram connection",
     minioQuotaLabel: "MinIO",
+    previewCacheLabel: "Image cache (1GB)",
     adminAccountQuotaTitle: "Per-account MinIO quota (admin)",
     accountLabel: "Account",
     roleLabel: "Role",
@@ -354,10 +422,10 @@ const i18n = {
     telegramSaved: "Telegram settings saved",
     systemSettingsTitle: "Server settings",
     systemSettingsHint:
-      "`TELEGRAM_STORAGE_CHAT_FOR_PUBLIC_ID` (shared storage — UI/DB only, not env), alert chat (`TELEGRAM_ALERT_CHAT_ID`), public URL, ZIP, MySQL backup… Bot token on the admin account (Settings → Telegram connection). Applied immediately (upload queue still reads env at worker startup).",
+      "`TELEGRAM_STORAGE_CHAT_FOR_PUBLIC_ID` (shared storage — UI/DB), alert chat (`TELEGRAM_ALERT_CHAT_ID`), public URL, upload queue, ZIP, MySQL backup… Bot token on the admin account (Settings → Telegram connection).",
     runtimeSave: "Save settings",
     runtimeSaved: "Server settings saved",
-    queueWorkerTitle: "Upload queue (env only)",
+    queueWorkerTitle: "Upload queue",
     runtimeOverridesHint: "Keys in app_settings (all seeded on first app boot)",
     storage: "Storage",
     quickSearch: "Search in drive",
@@ -517,6 +585,7 @@ const state = {
   uploadProcessing: false,
   uploadRetryTimer: null,
   uploadQueueSuppressed: false,
+  uploadQueueParallel: UPLOAD_QUEUE_PARALLEL_FALLBACK,
   maxUploadBytes: 50 * 1024 * 1024 * 1024,
   minioQuotaUsedBytes: 0,
   minioQuotaLimitBytes: 0,
@@ -1025,7 +1094,10 @@ function clearCompletedTransfers() {
 }
 
 function openUploadDb() {
-  return new Promise((resolve, reject) => {
+  if (uploadDbPromise) {
+    return uploadDbPromise;
+  }
+  uploadDbPromise = new Promise((resolve, reject) => {
     const req = indexedDB.open(UPLOAD_DB_NAME, 1);
     req.onupgradeneeded = () => {
       const db = req.result;
@@ -1034,13 +1106,21 @@ function openUploadDb() {
       }
     };
     req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
+    req.onerror = () => {
+      uploadDbPromise = null;
+      reject(req.error);
+    };
   });
+  return uploadDbPromise;
 }
 
 async function uploadStore(mode = "readonly") {
   const db = await openUploadDb();
   return db.transaction(UPLOAD_STORE_NAME, mode).objectStore(UPLOAD_STORE_NAME);
+}
+
+function warmUploadPipeline() {
+  void openUploadDb().catch(() => undefined);
 }
 
 async function putUploadRecord(record) {
@@ -1212,81 +1292,109 @@ async function processUploadQueue() {
     state.uploadRetryTimer = null;
   }
   state.uploadProcessing = true;
+  const inFlight = new Map();
   try {
     while (true) {
       if (state.uploadQueueSuppressed) return;
       const now = Date.now();
       const records = (await getAllUploadRecords()).sort((a, b) => a.createdAt - b.createdAt);
-      const record = records.find((item) => !item.retryAfter || item.retryAfter <= now);
-      if (!record && records.length) {
-        const nextRetryAt = Math.min(...records.map((item) => item.retryAfter || now));
-        scheduleUploadQueue(Math.max(1000, nextRetryAt - now));
+      const busyIds = new Set(inFlight.keys());
+      const ready = records.filter(
+        (item) => (!item.retryAfter || item.retryAfter <= now) && !busyIds.has(item.id),
+      );
+      while (ready.length > 0 && inFlight.size < state.uploadQueueParallel) {
+        const record = ready.shift();
+        const task = processUploadRecord(record).finally(() => {
+          inFlight.delete(record.id);
+        });
+        inFlight.set(record.id, task);
+      }
+      if (inFlight.size === 0) {
+        if (!records.length) return;
+        const pendingRetry = records
+          .filter((item) => !busyIds.has(item.id))
+          .map((item) => item.retryAfter || now);
+        if (pendingRetry.length) {
+          const nextRetryAt = Math.min(...pendingRetry);
+          scheduleUploadQueue(Math.max(1000, nextRetryAt - now));
+          return;
+        }
         return;
       }
-      if (!record) return;
-      try {
-        if (!record.jobId) {
-          record.status = "uploading";
-          await putUploadRecord(record);
-          updateTransfer(record.id, {
-            status: t("uploading"),
-            loaded: 0,
-            total: record.file?.size || 0,
-            speed: 0,
-            cancelable: true,
-            error: false,
-          });
-          const queued = await uploadFileRecord(record);
-          record.jobId = queued.jobId;
-        }
-        updateTransfer(record.id, {
-          status: t("processing"),
-          speed: 0,
-          error: false,
-          cancelable: false,
-          loaded: record.file?.size || 0,
-          total: record.file?.size || 0,
-        });
-        const result = await watchUploadJob(record.jobId, record.id, record.file?.size ?? 0);
-        if (result === "addDuplicateAnyway") {
-          record.allowDuplicateContent = true;
-          record.status = "queued";
-          record.createdAt = Date.now();
-          delete record.retryAfter;
-          delete record.jobId;
-          await putUploadRecord(record);
-          updateTransfer(record.id, { status: t("queued"), loaded: 0, total: record.file.size, speed: 0, cancelable: true, error: false });
-          continue;
-        }
-        await deleteUploadRecord(record.id);
-      } catch (err) {
-        if (isTransferCanceled(err)) {
-          await deleteUploadRecord(record.id);
-          continue;
-        }
-        const quotaRejected = isMinioQuotaUploadError(err?.message || String(err));
-        if (quotaRejected) {
-          await deleteUploadRecord(record.id);
-        } else {
-          record.status = "queued";
-          record.createdAt = Date.now();
-          record.retryAfter = Date.now() + UPLOAD_RETRY_DELAY_MS;
-          delete record.jobId;
-          await putUploadRecord(record);
-        }
-        updateTransfer(record.id, {
-          status: uploadFailureStatus(err),
-          error: true,
-          speed: 0,
-          cancelable: false,
-        });
-        if (!quotaRejected) {
-          toast(`${t("uploadFailed")}: ${record.fileName}`);
-        }
-      }
+      await Promise.race([...inFlight.values()]);
     }
   } finally {
     state.uploadProcessing = false;
+  }
+}
+
+async function processUploadRecord(record) {
+  try {
+    if (!record.jobId) {
+      record.status = "uploading";
+      await putUploadRecord(record);
+      updateTransfer(record.id, {
+        status: t("uploading"),
+        loaded: 0,
+        total: record.file?.size || 0,
+        speed: 0,
+        cancelable: true,
+        error: false,
+      });
+      const queued = await uploadFileRecord(record);
+      record.jobId = queued.jobId;
+    }
+    updateTransfer(record.id, {
+      status: t("processing"),
+      speed: 0,
+      error: false,
+      cancelable: false,
+      loaded: record.file?.size || 0,
+      total: record.file?.size || 0,
+    });
+    const result = await watchUploadJob(record.jobId, record.id, record.file?.size ?? 0);
+    if (result === "addDuplicateAnyway") {
+      record.allowDuplicateContent = true;
+      record.status = "queued";
+      record.createdAt = Date.now();
+      delete record.retryAfter;
+      delete record.jobId;
+      await putUploadRecord(record);
+      updateTransfer(record.id, {
+        status: t("queued"),
+        loaded: 0,
+        total: record.file.size,
+        speed: 0,
+        cancelable: true,
+        error: false,
+      });
+      return;
+    }
+    await deleteUploadRecord(record.id);
+  } catch (err) {
+    if (isTransferCanceled(err)) {
+      await deleteUploadRecord(record.id);
+      return;
+    }
+    const quotaRejected = isMinioQuotaUploadError(err?.message || String(err));
+    if (quotaRejected) {
+      await deleteUploadRecord(record.id);
+    } else {
+      record.status = "queued";
+      record.createdAt = Date.now();
+      record.retryAfter = Date.now() + UPLOAD_RETRY_DELAY_MS;
+      delete record.jobId;
+      await putUploadRecord(record);
+    }
+    updateTransfer(record.id, {
+      status: uploadFailureStatus(err),
+      error: true,
+      speed: 0,
+      cancelable: false,
+    });
+    if (!quotaRejected) {
+      toast(`${t("uploadFailed")}: ${record.fileName}`);
+    }
   }
 }
 
@@ -1636,6 +1744,7 @@ function clearAuth() {
   if ("caches" in window) {
     void caches.delete(PREVIEW_CACHE_NAME);
   }
+  localStorage.removeItem(PREVIEW_CACHE_META_KEY);
 }
 
 async function forceReauth() {
@@ -1695,6 +1804,11 @@ function applyAppConfig(data) {
     loadMusicLibraryFromStorage();
     renderMusicLibraryNav();
   }
+  const uploadQueueConcurrency = Number(data?.uploadQueueConcurrency);
+  state.uploadQueueParallel =
+    Number.isFinite(uploadQueueConcurrency) && uploadQueueConcurrency > 0
+      ? Math.floor(uploadQueueConcurrency)
+      : UPLOAD_QUEUE_PARALLEL_FALLBACK;
   renderSettingsSelf();
   syncAdminOnlyNavVisibility();
   syncSidebarMinioQuotaVisibility();
@@ -2313,7 +2427,13 @@ async function loadThumbnail(container, file, mode) {
     img.alt = file.name;
     img.loading = "lazy";
     img.className = "loading";
-    img.onload = () => img.classList.remove("loading");
+    img.onload = () => {
+      img.classList.remove("loading");
+      const isPortrait = img.naturalHeight > img.naturalWidth;
+      img.classList.toggle("portrait", isPortrait);
+      container.classList.toggle("portrait", isPortrait);
+      container.classList.toggle("landscape", !isPortrait);
+    };
     img.onerror = async () => {
       try {
         img.src = await objectUrlWithAuth(fileThumbnailUrl(file), { cache: true });
@@ -2327,6 +2447,33 @@ async function loadThumbnail(container, file, mode) {
     container.appendChild(img);
   } catch {
     /* Keep fallback icon when thumbnail cannot be loaded. */
+  }
+}
+
+function warmPreviewCache(file) {
+  if (!file?.mimeType?.startsWith("image/")) {
+    return;
+  }
+  const viewUrl = fileViewUrl(file);
+  if (previewWarmCacheUrls.has(viewUrl)) {
+    return;
+  }
+  previewWarmCacheUrls.add(viewUrl);
+  void cachedFetchWithAuth(viewUrl).finally(() => {
+    previewWarmCacheUrls.delete(viewUrl);
+  });
+}
+
+function warmPreviewCacheBatch(files, opts = {}) {
+  if (!Array.isArray(files) || files.length === 0) return;
+  const start = Math.max(0, Number(opts.start || 0));
+  const limit = Math.max(1, Number(opts.limit || PREVIEW_WARM_BATCH_SIZE));
+  let queued = 0;
+  for (let i = start; i < files.length && queued < limit; i += 1) {
+    const file = files[i];
+    if (!file?.mimeType?.startsWith("image/")) continue;
+    warmPreviewCache(file);
+    queued += 1;
   }
 }
 
@@ -2644,6 +2791,8 @@ function renderFileList(target, files, mode = "drive") {
       }
       void openFilePreview(file).catch(showError);
     });
+    row.addEventListener("pointerenter", () => warmPreviewCache(file), { passive: true });
+    row.addEventListener("touchstart", () => warmPreviewCache(file), { passive: true, once: true });
     const tags = (file.tags || []).map((tag) => `<span class="tag">${escapeHtml(tag)}</span>`).join("");
     const uploadedAt = formatUploadedAt(file.createdAt);
     const cardMeta = [formatBytes(file.size), uploadedAt].filter(Boolean).join(" · ");
@@ -2701,6 +2850,8 @@ function renderFileList(target, files, mode = "drive") {
     }
     list.appendChild(row);
   });
+  const warmLimit = mode === "images" ? PREVIEW_WARM_BATCH_SIZE : 6;
+  warmPreviewCacheBatch(files, { start: 0, limit: warmLimit });
   syncSelectionBar();
 }
 
@@ -2800,6 +2951,13 @@ function fileThumbnailUrl(fileOrId) {
 async function openFilePreview(file) {
   const previewToken = ++state.previewToken;
   state.previewIndex = state.visibleFiles.findIndex((item) => item.id === file.id);
+  if (state.previewIndex >= 0) {
+    // Warm nearby images for faster next/prev navigation.
+    warmPreviewCacheBatch(state.visibleFiles, {
+      start: Math.max(0, state.previewIndex - 2),
+      limit: PREVIEW_WARM_BATCH_SIZE,
+    });
+  }
   if (file.canDirectDownload === false) {
     showTelegramFallback(file, previewToken);
     return;
@@ -2822,18 +2980,23 @@ async function openFilePreview(file) {
     img.alt = file.name;
     img.className = "loading";
     img.onload = () => img.classList.remove("loading");
-    img.onerror = async () => {
-      try {
-        const fallbackUrl = await objectUrlWithAuth(viewUrl, { cache: true });
-        if (previewToken !== state.previewToken) return;
-        img.src = fallbackUrl;
-      } catch {
-        if (previewToken === state.previewToken) showTelegramFallback(file, previewToken);
+    img.onerror = () => {
+      if (previewToken === state.previewToken) {
+        showTelegramFallback(file, previewToken);
       }
     };
     if (previewToken !== state.previewToken) return;
-    img.src = viewUrl;
+    if (file.thumbnailTelegramFileId) {
+      img.src = fileThumbnailUrl(file);
+    }
     body.appendChild(createZoomableImagePreview(img));
+    try {
+      const fullImageUrl = await objectUrlWithAuth(viewUrl, { cache: true });
+      if (previewToken !== state.previewToken) return;
+      img.src = fullImageUrl;
+    } catch {
+      if (previewToken === state.previewToken) showTelegramFallback(file, previewToken);
+    }
     return;
   }
   if (file.mimeType?.startsWith("video/")) {
@@ -3086,11 +3249,30 @@ async function fetchWithAuth(url, options = {}) {
 async function cachedFetchWithAuth(url) {
   if ("caches" in window) {
     const cache = await caches.open(PREVIEW_CACHE_NAME);
+    const meta = readPreviewCacheMeta();
+    await prunePreviewCache(cache, meta);
     const cached = await cache.match(url);
-    if (cached) return cached.clone();
+    const now = Date.now();
+    const info = meta[url];
+    if (cached && info?.lastViewedAt && now - Number(info.lastViewedAt) <= PREVIEW_CACHE_TTL_MS) {
+      meta[url] = { ...info, lastViewedAt: now };
+      writePreviewCacheMeta(meta);
+      return cached.clone();
+    }
+    if (cached) {
+      await cache.delete(url).catch(() => undefined);
+      dropCachedObjectUrl(url);
+      delete meta[url];
+      writePreviewCacheMeta(meta);
+    }
     const fresh = await fetchWithAuth(url);
     if (fresh.ok) {
       await cache.put(url, fresh.clone());
+      const headerSize = Number(fresh.headers.get("content-length") || 0);
+      const size = headerSize > 0 ? headerSize : (await fresh.clone().blob()).size;
+      meta[url] = { size: Math.max(0, Number(size || 0)), lastViewedAt: now };
+      await prunePreviewCache(cache, meta);
+      writePreviewCacheMeta(meta);
     }
     return fresh;
   }
@@ -5441,6 +5623,7 @@ function registerServiceWorker() {
 
 async function init() {
   registerServiceWorker();
+  warmUploadPipeline();
   if (!state.authToken) {
     const path = `${location.pathname}${location.search}${location.hash}`;
     window.location.replace(`/login.html?next=${encodeURIComponent(path || "/")}`);
